@@ -1,0 +1,57 @@
+name: Yusuf Eve Giris APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        run: yes | sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Setup Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Restore signing keystore
+        env:
+          YUSUF_KEYSTORE_B64: ${{ secrets.YUSUF_KEYSTORE_B64 }}
+        run: |
+          test -n "$YUSUF_KEYSTORE_B64"
+          printf '%s' "$YUSUF_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/yusuf_eve_giris_release.p12"
+
+      - name: Build signed release APK
+        env:
+          YUSUF_KEYSTORE_FILE: ${{ runner.temp }}/yusuf_eve_giris_release.p12
+          YUSUF_KEYSTORE_PASSWORD: ${{ secrets.YUSUF_KEYSTORE_PASSWORD }}
+          YUSUF_KEY_ALIAS: ${{ secrets.YUSUF_KEY_ALIAS }}
+          YUSUF_KEY_PASSWORD: ${{ secrets.YUSUF_KEY_PASSWORD }}
+        run: gradle --no-daemon clean assembleRelease
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/release/app-release.apk Yusuf_Eve_Giris_V6.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Yusuf_Eve_Giris_V6
+          path: Yusuf_Eve_Giris_V6.apk
+          if-no-files-found: error

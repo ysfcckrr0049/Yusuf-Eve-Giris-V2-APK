@@ -1,0 +1,52 @@
+plugins {
+    id 'com.android.application'
+}
+
+def ksPath = System.getenv('YUSUF_KEYSTORE_FILE')
+def ksPass = System.getenv('YUSUF_KEYSTORE_PASSWORD')
+def keyAliasEnv = System.getenv('YUSUF_KEY_ALIAS')
+def keyPassEnv = System.getenv('YUSUF_KEY_PASSWORD')
+
+android {
+    namespace 'com.yusuf.evegiris'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.yusuf.evegiris.v2'
+        minSdk 26
+        targetSdk 35
+        versionCode 6
+        versionName '6.0'
+    }
+
+    signingConfigs {
+        release {
+            if (ksPath != null && !ksPath.isEmpty()) {
+                storeFile file(ksPath)
+                storePassword ksPass
+                keyAlias keyAliasEnv
+                keyPassword keyPassEnv
+                storeType 'pkcs12'
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (ksPath != null && !ksPath.isEmpty()) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'com.google.android.gms:play-services-location:21.4.0'
+    implementation 'org.osmdroid:osmdroid-android:6.1.20'
+}
