@@ -128,5 +128,57 @@ public final class HttpsGatewayPublisher {
         }
     }
 
+
+    /**
+     * Gercek eve-giris olayi olusturmayan HTTPS guvenlik testi.
+     * Gateway test_ ile baslayan methodu forward etmeden 403 ile reddeder.
+     * 403 burada BASARI: TLS pin + IP SAN + gizli path + HMAC calisiyor,
+     * fakat MQTT / HA eve-giris otomasyonu tetiklenmiyor.
+     */
+    public static int safeProbe() throws Exception {
+        String eventId = java.util.UUID.randomUUID().toString();
+        long eventTs = System.currentTimeMillis();
+
+        String body = "{\"event\":\"YUSUF_EVE_GELDI\",\"method\":\"test_https_probe\""
+                + ",\"ts\":" + eventTs
+                + ",\"source\":\"YusufEveGirisAPK\",\"event_id\":\""
+                + jsonEscape(eventId) + "\"}";
+
+        byte[] raw = body.getBytes(StandardCharsets.UTF_8);
+
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(
+                GatewayConfig.HMAC_SECRET.getBytes(StandardCharsets.UTF_8),
+                "HmacSHA256"
+        ));
+        String sig = hex(mac.doFinal(raw));
+
+        URL url = new URL(BASE + GatewayConfig.PATH_TOKEN);
+        HttpsURLConnection c = (HttpsURLConnection) url.openConnection();
+        c.setSSLSocketFactory(pinnedFactory());
+        c.setConnectTimeout(7000);
+        c.setReadTimeout(10000);
+        c.setUseCaches(false);
+        c.setRequestMethod("POST");
+        c.setDoOutput(true);
+        c.setRequestProperty("Content-Type", "application/json");
+        c.setRequestProperty("X-Yusuf-Signature", sig);
+        c.setFixedLengthStreamingMode(raw.length);
+
+        try {
+            try (OutputStream out = c.getOutputStream()) {
+                out.write(raw);
+                out.flush();
+            }
+            int code = c.getResponseCode();
+            if (code != 403) {
+                throw new Exception("HTTPS kuru test beklenmeyen HTTP " + code);
+            }
+            return code;
+        } finally {
+            c.disconnect();
+        }
+    }
+
     private HttpsGatewayPublisher() {}
 }

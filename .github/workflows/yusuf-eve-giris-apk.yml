@@ -69,11 +69,11 @@ jobs:
         run: gradle --no-daemon clean assembleRelease
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/release/app-release.apk Yusuf_Eve_Giris_V7.apk
+        run: cp app/build/outputs/apk/release/app-release.apk Yusuf_Eve_Giris_V7_1.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Yusuf_Eve_Giris_V7
-          path: Yusuf_Eve_Giris_V7.apk
+          name: Yusuf_Eve_Giris_V7_1
+          path: Yusuf_Eve_Giris_V7_1.apk
           if-no-files-found: error

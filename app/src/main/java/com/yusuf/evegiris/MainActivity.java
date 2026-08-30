@@ -101,14 +101,14 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("YUSUF EVE GİRİŞ V7");
+        title.setText("YUSUF EVE GİRİŞ V7.1");
         title.setTextSize(24f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setPadding(0, 0, 0, dp(8));
         root.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("HTTPS 449 + TLS pin + HMAC\nHaritalı ev alanı + Ysf Golf6 + Wi‑Fi + Android Auto + şarj\nV7: HTTPS birincil, MQTT QoS1 yalnız yedek; mevcut zaman/kilit algoritması korunur");
+        sub.setText("HTTPS 449 + TLS pin + HMAC\nHaritalı ev alanı + Ysf Golf6 + Wi‑Fi + Android Auto + şarj\nV7.1: HTTPS birincil + uygulama içi güvenli 449 testi; MQTT QoS1 yalnız yedek");
         root.addView(sub);
 
         root.addView(label("Ev Alanı Haritası"));
@@ -175,6 +175,7 @@ public class MainActivity extends Activity {
         }));
         root.addView(button("ZAMAN AŞIMI / GÜVENLİK AYARLARI", v -> startActivity(new Intent(this, TimingSettingsActivity.class))));
         root.addView(button("ARKA PLAN KONUM İZNİ AYARLARI", v -> openAppSettings()));
+        root.addView(button("HTTPS 449 GÜVENLİ BAĞLANTI TESTİ", v -> testHttpsSafe()));
         root.addView(button("MQTT YEDEK BAĞLANTI TESTİ", v -> testMqtt()));
         root.addView(button("İZLEMEYİ BAŞLAT", v -> startMonitor()));
         root.addView(button("KONUMU ŞİMDİ TAZELE (YÜKSEK DOĞRULUK)", v -> sendServiceAction(MonitorService.ACTION_FORCE_LOCATION)));
@@ -480,6 +481,45 @@ public class MainActivity extends Activity {
         toast("İzinler > Konum > Her zaman izin ver seçeneğini aç");
     }
 
+    private void testHttpsSafe() {
+        statusText.setText("HTTPS 449 güvenli bağlantı testi yapılıyor...\n"
+                + "Bu test MQTT veya ışık tetiklemez.");
+
+        new Thread(() -> {
+            try {
+                int code = HttpsGatewayPublisher.safeProbe();
+                runOnUiThread(() -> {
+                    String detail = "HTTPS 449 BAŞARILI • HTTP " + code
+                            + " • TLS pin + IP SAN + gizli path + HMAC doğrulandı. "
+                            + "test_ olayı gateway tarafından forward edilmedi; MQTT/ışık tetiklenmedi.";
+                    Prefs.status(this, detail);
+                    Prefs.p(this).edit()
+                            .putString("flow_stage", "HTTPS TEST BAŞARILI")
+                            .putString("flow_detail", detail)
+                            .putLong("flow_stage_ms", System.currentTimeMillis())
+                            .apply();
+                    Prefs.addEvent(this, "HTTPS TEST BAŞARILI", detail);
+                    toast("HTTPS 449 güvenli test BAŞARILI");
+                    refreshStatus();
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                    String detail = "HTTPS 449 TEST HATA: " + msg;
+                    Prefs.status(this, detail);
+                    Prefs.p(this).edit()
+                            .putString("flow_stage", "HTTPS TEST HATASI")
+                            .putString("flow_detail", detail)
+                            .putLong("flow_stage_ms", System.currentTimeMillis())
+                            .apply();
+                    Prefs.addEvent(this, "HTTPS TEST HATASI", detail);
+                    toast(detail);
+                    refreshStatus();
+                });
+            }
+        }, "https-safe-test").start();
+    }
+
     private void testMqtt() {
         save();
         statusText.setText("MQTT bağlantısı test ediliyor...\nTailscale açık olmalı.");
@@ -579,7 +619,7 @@ public class MainActivity extends Activity {
         boolean carBt = p.getBoolean("car_bt_connected", false);
         String next;
 
-        if (sending) next = "MQTT gönderimi bitmesi bekleniyor.";
+        if (sending) next = "Eve-giriş gönderiminin bitmesi bekleniyor.";
         else if (now < graceUntil) next = "Servis başlangıç korumasının bitmesi bekleniyor.";
         else if (cooldownRemain > 0) next = Prefs.cooldownMinutes(this) + " dk ortak tetik kilidinin bitmesi bekleniyor.";
         else if (!insideHome) next = "Telefonun ev alanına girmesi bekleniyor.";
