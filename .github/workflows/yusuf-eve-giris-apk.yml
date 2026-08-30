@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,6 +32,27 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Generate HTTPS gateway config
+        env:
+          YUSUF_GATEWAY_PATH: ${{ secrets.YUSUF_GATEWAY_PATH }}
+          YUSUF_GATEWAY_HMAC: ${{ secrets.YUSUF_GATEWAY_HMAC }}
+          YUSUF_GATEWAY_SPKI_PIN: ${{ secrets.YUSUF_GATEWAY_SPKI_PIN }}
+        run: |
+          test -n "$YUSUF_GATEWAY_PATH"
+          test -n "$YUSUF_GATEWAY_HMAC"
+          test -n "$YUSUF_GATEWAY_SPKI_PIN"
+          cat > app/src/main/java/com/yusuf/evegiris/GatewayConfig.java <<EOF
+          package com.yusuf.evegiris;
+
+          final class GatewayConfig {
+              static final String PATH_TOKEN = "${YUSUF_GATEWAY_PATH}";
+              static final String HMAC_SECRET = "${YUSUF_GATEWAY_HMAC}";
+              static final String SPKI_PIN = "${YUSUF_GATEWAY_SPKI_PIN}";
+              private GatewayConfig() {}
+          }
+          EOF
+          chmod 600 app/src/main/java/com/yusuf/evegiris/GatewayConfig.java
+
       - name: Restore signing keystore
         env:
           YUSUF_KEYSTORE_B64: ${{ secrets.YUSUF_KEYSTORE_B64 }}
@@ -47,11 +69,11 @@ jobs:
         run: gradle --no-daemon clean assembleRelease
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/release/app-release.apk Yusuf_Eve_Giris_V6.apk
+        run: cp app/build/outputs/apk/release/app-release.apk Yusuf_Eve_Giris_V7.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Yusuf_Eve_Giris_V6
-          path: Yusuf_Eve_Giris_V6.apk
+          name: Yusuf_Eve_Giris_V7
+          path: Yusuf_Eve_Giris_V7.apk
           if-no-files-found: error

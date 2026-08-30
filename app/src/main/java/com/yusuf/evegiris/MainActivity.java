@@ -101,14 +101,14 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("YUSUF EVE GİRİŞ V6");
+        title.setText("YUSUF EVE GİRİŞ V7");
         title.setTextSize(24f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setPadding(0, 0, 0, dp(8));
         root.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("Tailscale L3 + MQTT\nHaritalı ev alanı + Ysf Golf6 + Wi‑Fi + Android Auto + şarj\nV6: sert zaman aşımı iptali + ayrı Zaman/Güvenlik Ayarları");
+        sub.setText("HTTPS 449 + TLS pin + HMAC\nHaritalı ev alanı + Ysf Golf6 + Wi‑Fi + Android Auto + şarj\nV7: HTTPS birincil, MQTT QoS1 yalnız yedek; mevcut zaman/kilit algoritması korunur");
         root.addView(sub);
 
         root.addView(label("Ev Alanı Haritası"));
@@ -140,7 +140,7 @@ public class MainActivity extends Activity {
         root.addView(button("ŞU ANKİ KONUMU EV YAP", v -> setCurrentAsHome()));
         root.addView(button("HARİTAYI EV KONUMUNA ORTALA", v -> centerHome()));
 
-        root.addView(label("MQTT Sunucu"));
+        root.addView(label("MQTT Sunucu (yalnız HTTPS başarısızsa yedek)"));
         host = edit("192.168.7.129"); root.addView(host);
         port = edit("1883"); port.setInputType(InputType.TYPE_CLASS_NUMBER); root.addView(port);
         user = edit("MQTT kullanıcı adı"); root.addView(user);
@@ -175,7 +175,7 @@ public class MainActivity extends Activity {
         }));
         root.addView(button("ZAMAN AŞIMI / GÜVENLİK AYARLARI", v -> startActivity(new Intent(this, TimingSettingsActivity.class))));
         root.addView(button("ARKA PLAN KONUM İZNİ AYARLARI", v -> openAppSettings()));
-        root.addView(button("MQTT / TAILSCALE BAĞLANTI TESTİ", v -> testMqtt()));
+        root.addView(button("MQTT YEDEK BAĞLANTI TESTİ", v -> testMqtt()));
         root.addView(button("İZLEMEYİ BAŞLAT", v -> startMonitor()));
         root.addView(button("KONUMU ŞİMDİ TAZELE (YÜKSEK DOĞRULUK)", v -> sendServiceAction(MonitorService.ACTION_FORCE_LOCATION)));
         root.addView(button("İZLEMEYİ DURDUR", v -> stopMonitor()));

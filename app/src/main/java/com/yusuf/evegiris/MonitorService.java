@@ -820,38 +820,85 @@ public class MonitorService extends Service implements LocationListener {
             return;
         }
         if (!sending.compareAndSet(false, true)) {
-            setFlow("RED gönderim sürüyor", method + " reddedildi: MQTT gönderimi zaten sürüyor.");
+            setFlow("RED gönderim sürüyor", method + " reddedildi: eve-giriş gönderimi zaten sürüyor.");
             return;
         }
 
         Prefs.p(this).edit().putBoolean("mqtt_sending", true).apply();
-        setFlow("MQTT gönderimi başladı", method + " için MQTT gönderimi başlatıldı.");
+        setFlow("HTTPS gönderimi başladı", method + " için güvenli HTTPS 449 gönderimi başlatıldı.");
 
         new Thread(() -> {
             Exception lastErr = null;
-            String payload = "{\"event\":\"YUSUF_EVE_GELDI\",\"method\":\"" + escape(method)
-                    + "\",\"ts\":" + System.currentTimeMillis()
-                    + ",\"source\":\"YusufEveGirisAPK\"}";
+            String eventId = java.util.UUID.randomUUID().toString();
+            long eventTs = System.currentTimeMillis();
+
             try {
+                // BIRINCI YOL: HTTPS + TLS SPKI pin + HMAC.
+                // Ayni eventId/ts tum retry'larda korunur.
                 for (int attempt = 1; attempt <= 3; attempt++) {
                     try {
-                        MqttPublisher.publish(Prefs.host(this), Prefs.port(this), Prefs.user(this), Prefs.pass(this), Prefs.topic(this), payload);
+                        int httpCode = HttpsGatewayPublisher.publish(method, eventId, eventTs);
                         long ok = System.currentTimeMillis();
-                        Prefs.p(this).edit().putLong("last_trigger_ms", ok).putString("last_trigger_method", method).apply();
-                        setFlow("MQTT gönderildi", method + " -> MQTT başarıyla gönderildi (deneme " + attempt + ")");
+                        Prefs.p(this).edit()
+                                .putLong("last_trigger_ms", ok)
+                                .putString("last_trigger_method", method)
+                                .apply();
+                        setFlow("HTTPS gönderildi",
+                                method + " -> HTTPS 449 kabul edildi (HTTP "
+                                        + httpCode + ", deneme " + attempt + ")");
                         return;
                     } catch (Exception e) {
                         lastErr = e;
-                        setFlow("MQTT denemesi hata", "Deneme " + attempt + " hata: " + e.getMessage());
+                        setFlow("HTTPS denemesi hata",
+                                "Deneme " + attempt + " hata: " + e.getMessage());
+                        try { Thread.sleep(1500L); } catch (InterruptedException ignored) {}
+                    }
+                }
+
+                // YEDEK YOL: mevcut MQTT QoS1 + PUBACK.
+                setFlow("HTTPS başarısız - MQTT yedek",
+                        "HTTPS 3 deneme başarısız. Mevcut MQTT QoS1 yedek yolu deneniyor.");
+
+                String payload = "{\"event\":\"YUSUF_EVE_GELDI\",\"method\":\"" + escape(method)
+                        + "\",\"ts\":" + eventTs
+                        + ",\"source\":\"YusufEveGirisAPK\",\"event_id\":\""
+                        + escape(eventId) + "\"}";
+
+                for (int attempt = 1; attempt <= 3; attempt++) {
+                    try {
+                        MqttPublisher.publish(
+                                Prefs.host(this),
+                                Prefs.port(this),
+                                Prefs.user(this),
+                                Prefs.pass(this),
+                                Prefs.topic(this),
+                                payload
+                        );
+                        long ok = System.currentTimeMillis();
+                        Prefs.p(this).edit()
+                                .putLong("last_trigger_ms", ok)
+                                .putString("last_trigger_method", method)
+                                .apply();
+                        setFlow("MQTT yedek gönderildi",
+                                method + " -> MQTT QoS1/PUBACK başarılı (deneme "
+                                        + attempt + ")");
+                        return;
+                    } catch (Exception e) {
+                        lastErr = e;
+                        setFlow("MQTT yedek denemesi hata",
+                                "Deneme " + attempt + " hata: " + e.getMessage());
                         try { Thread.sleep(2000L); } catch (InterruptedException ignored) {}
                     }
                 }
-                setFlow("MQTT gönderilemedi", lastErr == null ? "Bilinmeyen hata" : lastErr.getMessage());
+
+                setFlow("Gönderilemedi",
+                        lastErr == null ? "HTTPS ve MQTT başarısız: bilinmeyen hata"
+                                : "HTTPS ve MQTT başarısız: " + lastErr.getMessage());
             } finally {
                 sending.set(false);
                 Prefs.p(this).edit().putBoolean("mqtt_sending", false).apply();
             }
-        }, "mqtt-trigger").start();
+        }, "https-trigger").start();
     }
 
     private synchronized void expireTimedWindows() {
