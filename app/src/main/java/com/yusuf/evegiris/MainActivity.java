@@ -101,14 +101,14 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("YUSUF EVE GİRİŞ V7.1");
+        title.setText("YUSUF EVE GİRİŞ V7.3");
         title.setTextSize(24f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setPadding(0, 0, 0, dp(8));
         root.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("HTTPS 449 + TLS pin + HMAC\nHaritalı ev alanı + Ysf Golf6 + Wi‑Fi + Android Auto + şarj\nV7.1: HTTPS birincil + uygulama içi güvenli 449 testi; MQTT QoS1 yalnız yedek");
+        sub.setText("HTTPS 449 + TLS pin + HMAC\nHaritalı ev alanı + Ysf Golf6 + Wi‑Fi + Android Auto + şarj\nV7.3: bağımsız eve-giriş Wi-Fi 30 dk kilidi + test sıfırlama butonu");
         root.addView(sub);
 
         root.addView(label("Ev Alanı Haritası"));
@@ -187,6 +187,17 @@ public class MainActivity extends Activity {
             Prefs.p(this).edit().putString("flow_stage", "Kilit sıfırlandı")
                     .putString("flow_detail", "Ortak tetik kilidi manuel sıfırlandı.")
                     .putLong("flow_stage_ms", System.currentTimeMillis()).apply();
+            refreshStatus();
+        }));
+
+        root.addView(button("TEST: 30 DK WI-FI AÇMA KİLİDİNİ KALDIR", v -> {
+            Prefs.p(this).edit()
+                    .remove("home_wifi_enable_lock_until_ms")
+                    .putLong("home_wifi_enable_lock_manual_reset_ms", System.currentTimeMillis())
+                    .apply();
+            Prefs.addEvent(this, "Wi-Fi 30 dk kilidi kaldırıldı",
+                    "Sadece bağımsız eve-giriş Wi-Fi açma kilidi test amacıyla sıfırlandı.");
+            toast("30 dk Wi-Fi açma kilidi kaldırıldı");
             refreshStatus();
         }));
 

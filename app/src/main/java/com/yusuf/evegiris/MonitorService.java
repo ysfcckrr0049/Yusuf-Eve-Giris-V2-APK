@@ -66,6 +66,8 @@ public class MonitorService extends Service implements LocationListener {
     private static final long FRESH_LOCATION_TIMEOUT = 10_000L;
     private static final float MAX_TRIGGER_ACCURACY_METERS = 150f;
     private static final long WIFI_FALLBACK_WAIT_MS = 90_000L;
+    private static final long HOME_WIFI_ENABLE_LOCK_MS = 30L * 60L * 1000L;
+    private static final String HOME_WIFI_ENABLE_LOCK_KEY = "home_wifi_enable_lock_until_ms";
 
     private LocationManager locationManager;
     private FusedLocationProviderClient fusedLocationClient;
@@ -374,6 +376,27 @@ public class MonitorService extends Service implements LocationListener {
         } catch (Exception ignored) {}
     }
 
+    private void handleIndependentHomeWifiEnableLock() {
+        long now = System.currentTimeMillis();
+        SharedPreferences sp = Prefs.p(this);
+        long lockUntil = sp.getLong(HOME_WIFI_ENABLE_LOCK_KEY, 0L);
+
+        if (now < lockUntil) {
+            long remainSec = Math.max(0L, (lockUntil - now) / 1000L);
+            Prefs.addEvent(this, "Wi-Fi 30 dk kilidi",
+                    "Bagimsiz Wi-Fi acma kilidi aktif. Kalan=" + remainSec + " sn.");
+            return;
+        }
+
+        sp.edit()
+                .putLong(HOME_WIFI_ENABLE_LOCK_KEY, now + HOME_WIFI_ENABLE_LOCK_MS)
+                .putLong("home_wifi_enable_last_request_ms", now)
+                .apply();
+
+        Prefs.addEvent(this, "Wi-Fi acma istegi",
+                "Ev alanina giris algilandi. Bagimsiz 30 dk Wi-Fi acma kilidi baslatildi.");
+    }
+
     private void initWifi() {
         wifiAwaySince = Prefs.p(this).getLong("wifi_away_since", 0L);
         updateWifi();
@@ -656,6 +679,7 @@ public class MonitorService extends Service implements LocationListener {
             setFlow("İlk konum alındı", "Ev mesafesi=" + Math.round(d[0]) + "m, doğruluk=" + Math.round(accuracy) + "m, yaş=" + (fixAge / 1000L) + "sn, inside=" + nowInside);
         } else {
             if (!oldInside && nowInside) {
+                handleIndependentHomeWifiEnableLock();
                 boolean charging = isCharging();
                 Prefs.p(this).edit().putLong("last_home_enter_ms", System.currentTimeMillis()).apply();
                 setFlow("Ev alanına girdi", "Telefon ev alanına girdi. Şarj=" + charging + ", mesafe=" + Math.round(d[0]) + "m. Şimdi geliş kaynağı teyidi bekleniyor.");
