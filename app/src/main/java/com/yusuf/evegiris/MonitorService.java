@@ -17,8 +17,6 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.location.Location;
-import android.location.LocationListener;
-import android.location.LocationManager;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -33,16 +31,13 @@ import android.os.Looper;
 
 import com.google.android.gms.location.CurrentLocationRequest;
 import com.google.android.gms.location.FusedLocationProviderClient;
-import com.google.android.gms.location.LocationCallback;
-import com.google.android.gms.location.LocationRequest;
-import com.google.android.gms.location.LocationResult;
 import com.google.android.gms.location.LocationServices;
 import com.google.android.gms.location.Priority;
 import com.google.android.gms.tasks.CancellationTokenSource;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
-public class MonitorService extends Service implements LocationListener {
+public class MonitorService extends Service {
     public static final String ACTION_TEST_WIFI = "com.yusuf.evegiris.TEST_WIFI";
     public static final String ACTION_TEST_BT = "com.yusuf.evegiris.TEST_BT";
     public static final String ACTION_TEST_AA = "com.yusuf.evegiris.TEST_AA";
@@ -60,19 +55,20 @@ public class MonitorService extends Service implements LocationListener {
 
     private static final String CHANNEL = "yusuf_eve_giris_monitor";
     private static final int NOTIF_ID = 7041;
-    private static final long FUSED_INTERVAL = 3000L;
-    private static final long FUSED_MIN_INTERVAL = 1000L;
-    private static final float FUSED_MIN_DISTANCE = 1.0f;
+    // V7.4: Yuksek dogruluk sadece olay sonrasi; en fazla 3 kisa deneme.
+    private static final int MAX_LOCATION_ATTEMPTS = 3;
+    private static final long LOCATION_RETRY_INTERVAL_MS = 15_000L;
     private static final long FRESH_LOCATION_TIMEOUT = 10_000L;
     private static final float MAX_TRIGGER_ACCURACY_METERS = 150f;
     private static final long WIFI_FALLBACK_WAIT_MS = 90_000L;
     private static final long HOME_WIFI_ENABLE_LOCK_MS = 30L * 60L * 1000L;
     private static final String HOME_WIFI_ENABLE_LOCK_KEY = "home_wifi_enable_lock_until_ms";
 
-    private LocationManager locationManager;
     private FusedLocationProviderClient fusedLocationClient;
-    private LocationCallback fusedLocationCallback;
-    private volatile boolean fusedRunning = false;
+    private CancellationTokenSource activeLocationToken;
+    private volatile long locationRequestSerial = 0L;
+    private int candidateLocationAttempts = 0;
+    private long nextLocationRetryMs = 0L;
     private ConnectivityManager connectivityManager;
     private WifiManager wifiManager;
     private volatile boolean carBtConnected = false;
@@ -149,10 +145,7 @@ public class MonitorService extends Service implements LocationListener {
                             .putBoolean("charge_arrival_pending", false)
                             .remove("charge_pending_since_ms")
                             .apply();
-                    setFlow("Şarjdan çıktı",
-                            "Şarj penceresi içinde çıkarıldı (" + Prefs.chargeTimeoutMinutes(MonitorService.this)
-                                    + " dk sınır). Taze konum kontrolü başlıyor.");
-                    requestCandidate("charge", false);
+                    setFlow("Şarjdan çıktı", "V7.4: şarjdan çıkarma konum/MQTT tetiklemez; yalnızca Wi-Fi, Golf6 veya Android Auto olayları tetikler.");
                 } else if (pending) {
                     sp.edit()
                             .putBoolean("charge_arrival_pending", false)
@@ -184,7 +177,7 @@ public class MonitorService extends Service implements LocationListener {
     @Override public void onCreate() {
         super.onCreate();
         createChannel();
-        startForeground(NOTIF_ID, notification("İzleme aktif"));
+        startForeground(NOTIF_ID, notification("Olay tabanlı izleme aktif"));
         long now = System.currentTimeMillis();
         Prefs.p(this).edit()
                 .putBoolean("service_enabled", true)
@@ -193,9 +186,11 @@ public class MonitorService extends Service implements LocationListener {
                 .remove("event_pending_method").remove("event_pending_ms")
                 .putBoolean("event_pending_dry_run", false)
                 .putBoolean("mqtt_sending", false)
+                .putBoolean("fresh_location_waiting", false)
+                .putBoolean("charge_arrival_pending", false)
+                .remove("charge_pending_since_ms")
                 .apply();
 
-        locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
         connectivityManager = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         wifiManager = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
@@ -204,7 +199,8 @@ public class MonitorService extends Service implements LocationListener {
         initCharging();
         initBluetooth();
         initWifi();
-        initLocation();
+        Prefs.p(this).edit().putString("location_engine", "EVENT_ONLY_FUSED_HIGH_ACCURACY").apply();
+        // Surekli GPS istegi yok: Wi-Fi, Golf6 BT veya Android Auto kopusuyla istenir.
         timeoutHandler.post(timeoutTick);
         setFlow("Servis başlatıldı", "Başlangıç koruması=" + Prefs.startupGraceMinutes(this) + " dk. Zaman aşımı denetleyicisi aktif.");
     }
@@ -520,76 +516,27 @@ public class MonitorService extends Service implements LocationListener {
         }
     }
 
-    private void initLocation() {
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
-                && checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            setFlow("Konum izni yok", "Konum izni verilmediği için servis durduruldu.");
-            stopSelf();
+    private synchronized void requestFreshLocation(String reason, boolean candidateDriven) {
+        if (candidateDriven && pendingMethod == null) return;
+        if (candidateDriven && candidateLocationAttempts >= MAX_LOCATION_ATTEMPTS) return;
+        if (fusedLocationClient == null
+                || (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
+                && checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED)) {
+            if (candidateDriven) {
+                clearPending();
+                setFlow("KONUM İZNİ YOK", reason + ": izin yok veya konum servisi hazır değil. MQTT gönderilmedi.");
+            }
             return;
         }
 
-        try {
-            LocationRequest request = new LocationRequest.Builder(
-                    Priority.PRIORITY_HIGH_ACCURACY, FUSED_INTERVAL)
-                    .setMinUpdateIntervalMillis(FUSED_MIN_INTERVAL)
-                    .setMinUpdateDistanceMeters(FUSED_MIN_DISTANCE)
-                    .setMaxUpdateDelayMillis(0L)
-                    .setWaitForAccurateLocation(false)
-                    .build();
-
-            fusedLocationCallback = new LocationCallback() {
-                @Override public void onLocationResult(LocationResult result) {
-                    if (result == null) return;
-                    for (Location loc : result.getLocations()) {
-                        if (loc == null) continue;
-                        Prefs.p(MonitorService.this).edit()
-                                .putString("location_engine", "FUSED_HIGH_ACCURACY")
-                                .apply();
-                        onLocationChanged(loc);
-                    }
-                }
-            };
-
-            fusedLocationClient.requestLocationUpdates(
-                    request, fusedLocationCallback, Looper.getMainLooper());
-            fusedRunning = true;
-            Prefs.p(this).edit().putString("location_engine", "FUSED_HIGH_ACCURACY").apply();
-
-            requestFreshLocation("servis_baslangici", false);
-        } catch (Exception e) {
-            fusedRunning = false;
-            setFlow("Fused konum başlatılamadı",
-                    "Google Fused Location hata: " + e.getClass().getSimpleName()
-                            + ". Android LocationManager yedeği kullanılacak.");
-        }
-
-        if (!fusedRunning) {
-            try {
-                if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                    locationManager.requestLocationUpdates(
-                            LocationManager.NETWORK_PROVIDER, 3000L, 1f,
-                            this, Looper.getMainLooper());
-                }
-            } catch (Exception ignored) {}
-            try {
-                if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                    locationManager.requestLocationUpdates(
-                            LocationManager.GPS_PROVIDER, 3000L, 1f,
-                            this, Looper.getMainLooper());
-                }
-            } catch (Exception ignored) {}
-            Prefs.p(this).edit().putString("location_engine", "ANDROID_FALLBACK").apply();
-        }
-    }
-
-    private void requestFreshLocation(String reason, boolean candidateDriven) {
-        if (fusedLocationClient == null) return;
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
-                && checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            return;
-        }
-
+        // Onceki olay/manual istekten gec kalmis fix gelirse tetiklemeye izin verme.
+        if (activeLocationToken != null) activeLocationToken.cancel();
+        long serial = ++locationRequestSerial;
         long requestedAt = System.currentTimeMillis();
+        if (candidateDriven) {
+            candidateLocationAttempts++;
+            nextLocationRetryMs = requestedAt + LOCATION_RETRY_INTERVAL_MS;
+        }
         Prefs.p(this).edit()
                 .putLong("fresh_location_requested_ms", requestedAt)
                 .putString("fresh_location_reason", reason)
@@ -597,20 +544,21 @@ public class MonitorService extends Service implements LocationListener {
                 .apply();
 
         if (candidateDriven) {
-            setFlow("TAZE KONUM İSTENDİ",
-                    reason + " olayı geldi. Eski konum kullanılmıyor; yüksek doğrulukta yeni konum bekleniyor.");
+            setFlow("OLAY SONRASI KONUM", reason + ": taze konum isteniyor (deneme "
+                    + candidateLocationAttempts + "/" + MAX_LOCATION_ATTEMPTS + ").");
         }
-
         try {
             CurrentLocationRequest req = new CurrentLocationRequest.Builder()
                     .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
                     .setMaxUpdateAgeMillis(0L)
                     .setDurationMillis(FRESH_LOCATION_TIMEOUT)
                     .build();
-
             CancellationTokenSource cts = new CancellationTokenSource();
+            activeLocationToken = cts;
             fusedLocationClient.getCurrentLocation(req, cts.getToken())
                     .addOnSuccessListener(location -> {
+                        if (serial != locationRequestSerial) return;
+                        activeLocationToken = null;
                         long now = System.currentTimeMillis();
                         SharedPreferences.Editor e = Prefs.p(MonitorService.this).edit()
                                 .putBoolean("fresh_location_waiting", false)
@@ -618,18 +566,18 @@ public class MonitorService extends Service implements LocationListener {
                                 .putLong("fresh_location_latency_ms", Math.max(0L, now - requestedAt));
                         if (location != null) {
                             e.putString("fresh_location_result", "OK")
-                                    .putString("location_engine", "FUSED_FRESH_HIGH_ACCURACY")
+                                    .putString("location_engine", "EVENT_ONLY_FUSED_HIGH_ACCURACY")
                                     .apply();
                             onLocationChanged(location);
                         } else {
                             e.putString("fresh_location_result", "NULL").apply();
-                            if (candidateDriven) {
-                                setFlow("TAZE KONUM GELMEDİ",
-                                        reason + ": 10 sn içinde taze fix üretilemedi. Sürekli Fused takip 2 dk pencere içinde devam ediyor.");
-                            }
+                            if (candidateDriven) setFlow("TAZE KONUM GELMEDİ",
+                                    reason + ": 10 sn içinde fix gelmedi; sınırlı tekrar denenecek.");
                         }
                     })
                     .addOnFailureListener(err -> {
+                        if (serial != locationRequestSerial) return;
+                        activeLocationToken = null;
                         long now = System.currentTimeMillis();
                         Prefs.p(MonitorService.this).edit()
                                 .putBoolean("fresh_location_waiting", false)
@@ -637,21 +585,22 @@ public class MonitorService extends Service implements LocationListener {
                                 .putLong("fresh_location_latency_ms", Math.max(0L, now - requestedAt))
                                 .putString("fresh_location_result", "ERROR:" + err.getClass().getSimpleName())
                                 .apply();
-                        if (candidateDriven) {
-                            setFlow("TAZE KONUM HATASI",
-                                    reason + ": " + err.getClass().getSimpleName()
-                                            + ". Sürekli konum takibi devam ediyor.");
-                        }
+                        if (candidateDriven) setFlow("TAZE KONUM HATASI",
+                                reason + ": " + err.getClass().getSimpleName()
+                                        + "; sınırlı tekrar denenecek.");
                     });
         } catch (Exception e) {
-            Prefs.p(this).edit()
-                    .putBoolean("fresh_location_waiting", false)
-                    .putString("fresh_location_result", "START_ERROR:" + e.getClass().getSimpleName())
-                    .apply();
+            if (serial == locationRequestSerial) {
+                activeLocationToken = null;
+                Prefs.p(this).edit()
+                        .putBoolean("fresh_location_waiting", false)
+                        .putString("fresh_location_result", "START_ERROR:" + e.getClass().getSimpleName())
+                        .apply();
+            }
         }
     }
 
-    @Override public void onLocationChanged(Location location) {
+    private void onLocationChanged(Location location) {
         if (location == null || !Prefs.homeSet(this)) return;
 
         long nowMs = System.currentTimeMillis();
@@ -668,6 +617,13 @@ public class MonitorService extends Service implements LocationListener {
 
         float[] d = new float[1];
         Location.distanceBetween(location.getLatitude(), location.getLongitude(), Prefs.homeLat(this), Prefs.homeLon(this), d);
+        if (!location.hasAccuracy() || accuracy < 0f || accuracy > MAX_TRIGGER_ACCURACY_METERS
+                || fixAge > 15_000L || (pendingMethod != null && fixTime < pendingMethodAt - 15_000L)) {
+            setFlow("KONUM KALİTESİ YETERSİZ", "Mesafe=" + Math.round(d[0])
+                    + "m, doğruluk=" + Math.round(accuracy) + "m, yaş=" + (fixAge / 1000L)
+                    + "sn; güvenli tetik için kısa tekrar denenecek.");
+            return;
+        }
         boolean nowInside = d[0] <= Prefs.radius(this);
         boolean oldInside = insideHome;
         insideHome = nowInside;
@@ -683,13 +639,7 @@ public class MonitorService extends Service implements LocationListener {
                 boolean charging = isCharging();
                 Prefs.p(this).edit().putLong("last_home_enter_ms", System.currentTimeMillis()).apply();
                 setFlow("Ev alanına girdi", "Telefon ev alanına girdi. Şarj=" + charging + ", mesafe=" + Math.round(d[0]) + "m. Şimdi geliş kaynağı teyidi bekleniyor.");
-                if (charging) {
-                    Prefs.p(this).edit()
-                            .putBoolean("charge_arrival_pending", true)
-                            .putLong("charge_pending_since_ms", System.currentTimeMillis())
-                            .apply();
-                    setFlow("Şarjdan çıkma bekleniyor", "Ev alanına giriş şarjdayken oldu. " + Prefs.chargeTimeoutMinutes(this) + " dk içinde şarjdan çıkarılmazsa bu yöntem otomatik İPTAL.");
-                }
+                // V7.4: Sarj artik yeni konum istegi veya ek eve-giris olayi baslatmaz.
             }
             if (oldInside && !nowInside) {
                 Prefs.p(this).edit()
@@ -701,22 +651,23 @@ public class MonitorService extends Service implements LocationListener {
             }
         }
 
-        if (nowInside && pendingMethod != null) {
-            if (System.currentTimeMillis() - pendingMethodAt <= Prefs.candidateTimeoutMs(this)) {
+        if (pendingMethod != null) {
+            if (System.currentTimeMillis() - pendingMethodAt > Prefs.candidateTimeoutMs(this)) {
+                clearPending();
+                setFlow("GENEL ADAY ZAMAN AŞIMI", "Eski eve-giriş adayı süresi doldu; MQTT gönderilmedi.");
+            } else if (nowInside) {
                 String m = pendingMethod;
                 boolean dry = pendingDryRun;
                 clearPending();
                 evaluateTrigger(m + "_konum_teyit", dry);
             } else {
-                clearPending();
-                setFlow("GENEL ADAY ZAMAN AŞIMI", "Bekleyen " + Prefs.candidateTimeoutMinutes(this) + " dk geliş adayı penceresi doldu. MQTT yöntemi İPTAL.");
+                // Disarida ise sadece bu olay icin sinirli konum denemeleri yapilir.
+                setFlow("EV DIŞINDA", "Mesafe=" + Math.round(d[0])
+                        + "m; bu konumla eve giriş gönderilmez.");
             }
         }
     }
 
-    @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
-    @Override public void onProviderEnabled(String provider) {}
-    @Override public void onProviderDisabled(String provider) {}
 
     private boolean isCharging() {
         boolean c = Prefs.p(this).getBoolean("charging", false);
@@ -735,6 +686,8 @@ public class MonitorService extends Service implements LocationListener {
         pendingMethod = null;
         pendingDryRun = false;
         pendingMethodAt = 0L;
+        candidateLocationAttempts = 0;
+        nextLocationRetryMs = 0L;
         Prefs.p(this).edit().remove("event_pending_method").remove("event_pending_ms").remove("event_pending_origin_ms").putBoolean("event_pending_dry_run", false).apply();
     }
 
@@ -758,8 +711,11 @@ public class MonitorService extends Service implements LocationListener {
                         .putLong("event_pending_origin_ms", pendingMethodAt)
                         .putBoolean("event_pending_dry_run", true)
                         .apply();
+                candidateLocationAttempts = 0;
+                nextLocationRetryMs = 0L;
                 setFlow("TEST: Konum teyidi bekleniyor",
-                        method + " sahte olayı geldi; mevcut canlı konum ev alanına girerse test devam eder. MQTT gönderilmez.");
+                        method + " sahte olayı geldi; yalnızca olay için konum teyidi alınır. MQTT gönderilmez.");
+                requestFreshLocation(method, true);
             }
             return;
         }
@@ -767,6 +723,8 @@ public class MonitorService extends Service implements LocationListener {
         pendingMethod = method;
         pendingDryRun = false;
         pendingMethodAt = now;
+        candidateLocationAttempts = 0;
+        nextLocationRetryMs = 0L;
         Prefs.p(this).edit()
                 .putString("event_pending_method", method)
                 .putLong("event_pending_ms", pendingMethodAt)
@@ -775,7 +733,7 @@ public class MonitorService extends Service implements LocationListener {
                 .apply();
 
         setFlow("TAZE KONUM BEKLENİYOR",
-                method + " olayı geldi. En fazla " + Prefs.candidateTimeoutMinutes(this) + " dk geçerli. Son kayıtlı konum kullanılmayacak; taze konum bekleniyor.");
+                method + " olayı geldi. Son kayıtlı konum kullanılmayacak; en fazla 3 kısa taze konum denemesi yapılacak.");
         requestFreshLocation(method, true);
     }
 
@@ -786,40 +744,8 @@ public class MonitorService extends Service implements LocationListener {
         float locationAccuracy = Prefs.p(this).getFloat("last_location_accuracy_v5", -1f);
 
         if (!dryRun && (fixTime <= 0L || locationAge > 15_000L
-                || (locationAccuracy >= 0f && locationAccuracy > MAX_TRIGGER_ACCURACY_METERS))) {
-            SharedPreferences sp = Prefs.p(this);
-            long origin = sp.getLong("event_pending_origin_ms", 0L);
-            if (origin <= 0L) origin = nowForLocation;
-
-            if (nowForLocation - origin > Prefs.candidateTimeoutMs(this)) {
-                clearPending();
-                setFlow("GENEL ADAY ZAMAN AŞIMI",
-                        method + ": taze/uygun konum " + Prefs.candidateTimeoutMinutes(this)
-                                + " dk içinde alınamadı. MQTT geliş adayı İPTAL.");
-                return;
-            }
-
-            pendingMethod = method;
-            pendingDryRun = false;
-            pendingMethodAt = origin;
-            long lastRetry = sp.getLong("last_quality_retry_ms", 0L);
-            sp.edit()
-                    .putString("event_pending_method", method)
-                    .putLong("event_pending_ms", origin)
-                    .putLong("event_pending_origin_ms", origin)
-                    .apply();
-
-            setFlow("KONUM KALİTESİ BEKLENİYOR",
-                    method + ": konum yaşı="
-                            + (locationAge == Long.MAX_VALUE ? "yok" : (locationAge / 1000L) + "sn")
-                            + ", doğruluk=" + Math.round(locationAccuracy)
-                            + "m. Taze yüksek doğruluklu fix bekleniyor.");
-
-            if (nowForLocation - lastRetry >= 5000L
-                    && !sp.getBoolean("fresh_location_waiting", false)) {
-                sp.edit().putLong("last_quality_retry_ms", nowForLocation).apply();
-                requestFreshLocation(method + "_kalite", true);
-            }
+                || locationAccuracy < 0f || locationAccuracy > MAX_TRIGGER_ACCURACY_METERS)) {
+            setFlow("RED KONUM KALİTESİ", "Taze ve yeterli doğrulukta konum olmadığından MQTT gönderilmeyecek.");
             return;
         }
 
@@ -995,6 +921,30 @@ public class MonitorService extends Service implements LocationListener {
                     expired + " olayı " + Prefs.candidateTimeoutMinutes(this)
                             + " dk içinde tamamlanamadı. Eski olay silindi; sonradan MQTT tetikleyemez.");
         }
+
+        // Olaydan sonra en fazla 3 adet 10sn Fused fix istegi. Baska zamanda GPS kapali.
+        if (pendingMethod != null && nextLocationRetryMs > 0L && now >= nextLocationRetryMs) {
+            long lastRequest = sp.getLong("fresh_location_requested_ms", 0L);
+            boolean waiting = sp.getBoolean("fresh_location_waiting", false);
+            if (waiting && now - lastRequest > FRESH_LOCATION_TIMEOUT + 5_000L) {
+                if (activeLocationToken != null) activeLocationToken.cancel();
+                activeLocationToken = null;
+                locationRequestSerial++;
+                sp.edit().putBoolean("fresh_location_waiting", false)
+                        .putString("fresh_location_result", "TIMEOUT").apply();
+                waiting = false;
+            }
+            if (!waiting) {
+                if (candidateLocationAttempts < MAX_LOCATION_ATTEMPTS) {
+                    requestFreshLocation(pendingMethod + "_tekrar", true);
+                } else {
+                    String expired = pendingMethod;
+                    clearPending();
+                    setFlow("KONUM DOĞRULANAMADI", expired
+                            + ": 3 kısa denemeden sonra ev konumu doğrulanamadı. MQTT gönderilmedi.");
+                }
+            }
+        }
     }
 
     private void handleTestAction(String action) {
@@ -1107,12 +1057,9 @@ public class MonitorService extends Service implements LocationListener {
     @Override public void onDestroy() {
         timeoutHandler.removeCallbacksAndMessages(null);
         try { unregisterReceiver(receiver); } catch (Exception ignored) {}
-        try {
-            if (fusedLocationClient != null && fusedLocationCallback != null) {
-                fusedLocationClient.removeLocationUpdates(fusedLocationCallback);
-            }
-        } catch (Exception ignored) {}
-        try { if (locationManager != null) locationManager.removeUpdates(this); } catch (Exception ignored) {}
+        locationRequestSerial++;
+        if (activeLocationToken != null) activeLocationToken.cancel();
+        activeLocationToken = null;
         try { if (connectivityManager != null && wifiCallback != null) connectivityManager.unregisterNetworkCallback(wifiCallback); } catch (Exception ignored) {}
         Prefs.p(this).edit().putBoolean("mqtt_sending", false).apply();
         setFlow("Servis durdu", "Monitor servis durdu.");
