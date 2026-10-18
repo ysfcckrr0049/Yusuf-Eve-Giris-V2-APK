@@ -22,7 +22,22 @@ jobs:
           java-version: '17'
 
       - name: Install Android platform
-        run: sdkmanager --install 'platforms;android-35' 'build-tools;35.0.0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "Android SDK root: $SDK_ROOT"
+          if [ ! -d "$SDK_ROOT/platforms/android-35" ] || [ ! -d "$SDK_ROOT/build-tools/35.0.0" ]; then
+            SDKMGR="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager -print -quit 2>/dev/null || true)"
+            if [ -z "$SDKMGR" ]; then
+              echo '::error::Android sdkmanager bulunamadi'
+              exit 1
+            fi
+            "$SDKMGR" --sdk_root="$SDK_ROOT" --install 'platforms;android-35' 'build-tools;35.0.0'
+          fi
+          test -d "$SDK_ROOT/platforms/android-35"
+          test -d "$SDK_ROOT/build-tools/35.0.0"
+          echo 'Android 35 SDK ve build tools hazir.'
 
       - name: Setup Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
