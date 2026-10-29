@@ -46,6 +46,8 @@ public class MainActivity extends Activity {
     private EditText host, port, user, pass, topic, ssid, carBtName, radius;
     private TextView homeText, mapInfo, stageText, treeText, statusText, eventLogText;
     private LinearLayout visualFlow;
+    private TextView realNetworkTestResult;
+    private final java.util.concurrent.atomic.AtomicBoolean realNetworkTestRunning = new java.util.concurrent.atomic.AtomicBoolean(false);
     private MapView map;
     private Marker homeMarker, currentMarker, selectedMarker;
     private Polygon homeCircle;
@@ -101,14 +103,14 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("YUSUF EVE GİRİŞ V7.3");
+        title.setText("YUSUF EVE GİRİŞ V7.4.2");
         title.setTextSize(24f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setPadding(0, 0, 0, dp(8));
         root.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("HTTPS 449 + TLS pin + HMAC\nHaritalı ev alanı + Ysf Golf6 + Wi‑Fi + Android Auto + şarj\nV7.3: bağımsız eve-giriş Wi-Fi 30 dk kilidi + test sıfırlama butonu");
+        sub.setText("HTTPS 449 + TLS pin + HMAC\nHaritalı ev alanı + Ysf Golf6 + Wi‑Fi + Android Auto + şarj\nV7.4.2: olay bazlı konum + 3 gerçek bağlantı testi");
         root.addView(sub);
 
         root.addView(label("Ev Alanı Haritası"));
@@ -140,7 +142,7 @@ public class MainActivity extends Activity {
         root.addView(button("ŞU ANKİ KONUMU EV YAP", v -> setCurrentAsHome()));
         root.addView(button("HARİTAYI EV KONUMUNA ORTALA", v -> centerHome()));
 
-        root.addView(label("MQTT Sunucu (yalnız HTTPS başarısızsa yedek)"));
+        root.addView(label("MQTT Sunucu (LAN / Tailscale)"));
         host = edit("192.168.7.129"); root.addView(host);
         port = edit("1883"); port.setInputType(InputType.TYPE_CLASS_NUMBER); root.addView(port);
         user = edit("MQTT kullanıcı adı"); root.addView(user);
@@ -177,6 +179,17 @@ public class MainActivity extends Activity {
         root.addView(button("ARKA PLAN KONUM İZNİ AYARLARI", v -> openAppSettings()));
         root.addView(button("HTTPS 449 GÜVENLİ BAĞLANTI TESTİ", v -> testHttpsSafe()));
         root.addView(button("MQTT YEDEK BAĞLANTI TESTİ", v -> testMqtt()));
+        // YUSUF_TEST_V742_BEGIN - Gercek baglanti testleri: ev giris otomasyonunu tetiklemez.
+        root.addView(label("GERÇEK AĞ TESTLERİ (TETİKLEME YOK)"));
+        root.addView(button("GERÇEK TEST: TAILSCALE / MQTT QoS1", v -> runRealNetworkTest("TAILSCALE")));
+        root.addView(button("GERÇEK TEST: LAN / MQTT QoS1", v -> runRealNetworkTest("LAN")));
+        root.addView(button("GERÇEK TEST: WAN / HTTPS 449", v -> runRealNetworkTest("WAN")));
+        realNetworkTestResult = new TextView(this);
+        realNetworkTestResult.setText("Henüz bağlantı testi yapılmadı. Testler ayrı tanı konusu kullanır; ışık çalıştırmaz.");
+        realNetworkTestResult.setTextIsSelectable(true);
+        realNetworkTestResult.setPadding(dp(10), dp(12), dp(10), dp(12));
+        root.addView(realNetworkTestResult);
+        // YUSUF_TEST_V742_END
         root.addView(button("İZLEMEYİ BAŞLAT", v -> startMonitor()));
         root.addView(button("KONUMU ŞİMDİ TAZELE (YÜKSEK DOĞRULUK)", v -> sendServiceAction(MonitorService.ACTION_FORCE_LOCATION)));
         root.addView(button("İZLEMEYİ DURDUR", v -> stopMonitor()));
@@ -258,6 +271,24 @@ public class MainActivity extends Activity {
         root.addView(statusText);
 
         setContentView(scroll);
+    }
+
+    private void runRealNetworkTest(String mode) {
+        save();
+        if (!realNetworkTestRunning.compareAndSet(false, true)) {
+            toast("Başka bir ağ testi devam ediyor.");
+            return;
+        }
+        realNetworkTestResult.setText(mode + " • Gerçek bağlantı kontrol ediliyor...");
+        final android.content.Context app = getApplicationContext();
+        new Thread(() -> {
+            String report = RealNetworkDiagnostics.run(app, mode);
+            Prefs.addEvent(app, "GERÇEK AĞ TESTİ " + mode, report.replace('\n', ' '));
+            runOnUiThread(() -> {
+                realNetworkTestResult.setText(report);
+                realNetworkTestRunning.set(false);
+            });
+        }, "yusuf-test-" + mode).start();
     }
 
     private void sendServiceAction(String action) {

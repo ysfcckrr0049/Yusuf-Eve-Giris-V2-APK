@@ -136,6 +136,10 @@ public final class HttpsGatewayPublisher {
      * fakat MQTT / HA eve-giris otomasyonu tetiklenmiyor.
      */
     public static int safeProbe() throws Exception {
+        return safeProbe(null);
+    }
+
+    public static int safeProbe(android.net.Network network) throws Exception {
         String eventId = java.util.UUID.randomUUID().toString();
         long eventTs = System.currentTimeMillis();
 
@@ -154,7 +158,7 @@ public final class HttpsGatewayPublisher {
         String sig = hex(mac.doFinal(raw));
 
         URL url = new URL(BASE + GatewayConfig.PATH_TOKEN);
-        HttpsURLConnection c = (HttpsURLConnection) url.openConnection();
+        HttpsURLConnection c = (HttpsURLConnection) (network == null ? url.openConnection() : network.openConnection(url));
         c.setSSLSocketFactory(pinnedFactory());
         c.setConnectTimeout(7000);
         c.setReadTimeout(10000);
