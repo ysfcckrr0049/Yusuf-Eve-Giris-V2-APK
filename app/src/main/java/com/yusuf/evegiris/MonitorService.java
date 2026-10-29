@@ -776,117 +776,104 @@ public class MonitorService extends Service {
         }
 
         Prefs.p(this).edit().putBoolean("mqtt_sending", true).apply();
-        setFlow("HTTPS gönderimi başladı", method + " için güvenli HTTPS 449 gönderimi başlatıldı.");
+        setFlow("MQTT gönderimi başladı", method + " için MQTT QoS1 gonderimi başlatıldı; HTTPS yedek.");
 
         new Thread(() -> {
-            Exception lastErr = null;
+            // MQTT_PRIORITELI_V741 - Bir gelis olayi, tum tekrarlar ayni event_id.
+            Exception mqttError = null;
+            Exception httpsError = null;
             String eventId = java.util.UUID.randomUUID().toString();
             long eventTs = System.currentTimeMillis();
-
+            String payload = "{\"event\":\"YUSUF_EVE_GELDI\",\"method\":\"" + escape(method)
+                    + "\",\"ts\":" + eventTs
+                    + ",\"source\":\"YusufEveGirisAPK\",\"event_id\":\""
+                    + escape(eventId) + "\"}";
+            String targetSsid = Prefs.ssid(this);
             try {
-                // BIRINCI YOL: HTTPS + TLS SPKI pin + HMAC.
-                // Ayni eventId/ts tum retry'larda korunur.
-                for (int attempt = 1; attempt <= 3; attempt++) {
+                // Ev Wi-Fi'sinde fiziksel Wi-Fi socket; aksi halde sistem (VPN dahil) rotasi.
+                boolean homeWifi = !targetSsid.isEmpty() && targetSsid.equals(currentSsid());
+                int mqttAttempts = homeWifi ? 3 : 1;
+                setFlow("MQTT ilk kanal", "Gelis onaylandi. MQTT QoS1 ile gönderiliyor; ev Wi-Fi=" + homeWifi);
+                for (int attempt = 1; attempt <= mqttAttempts; attempt++) {
                     try {
-                        int httpCode = HttpsGatewayPublisher.publish(method, eventId, eventTs);
+                        MqttPublisher.publish(this, homeWifi,
+                                Prefs.host(this), Prefs.port(this), Prefs.user(this),
+                                Prefs.pass(this), Prefs.topic(this), payload);
                         long ok = System.currentTimeMillis();
-                        Prefs.p(this).edit()
-                                .putLong("last_trigger_ms", ok)
-                                .putString("last_trigger_method", method)
-                                .apply();
-                        setFlow("HTTPS gönderildi",
-                                method + " -> HTTPS 449 kabul edildi (HTTP "
-                                        + httpCode + ", deneme " + attempt + ")");
+                        Prefs.p(this).edit().putLong("last_trigger_ms", ok)
+                                .putString("last_trigger_method", method).apply();
+                        setFlow("MQTT basarili", method + " -> MQTT QoS1/PUBACK ALINDI; deneme " + attempt);
                         return;
                     } catch (Exception e) {
-                        lastErr = e;
-                        setFlow("HTTPS denemesi hata",
-                                "Deneme " + attempt + " hata: " + e.getMessage());
-                        try { Thread.sleep(1500L); } catch (InterruptedException ignored) {}
+                        mqttError = e;
+                        String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                        setFlow("MQTT ayrintili hata", "Deneme " + attempt + "/" + mqttAttempts + ": " + msg);
+                        if (attempt < mqttAttempts) {
+                            try { Thread.sleep(1400L); } catch (InterruptedException ignored) {}
+                        }
                     }
                 }
 
-                // YEDEK YOL: MQTT kacirma korumasi: once ev Wi-Fi beklenir.
-                String payload = "{\"event\":\"YUSUF_EVE_GELDI\",\"method\":\"" + escape(method)
-                        + "\",\"ts\":" + eventTs
-                        + ",\"source\":\"YusufEveGirisAPK\",\"event_id\":\""
-                        + escape(eventId) + "\"}";
+                // Port 449 isteklere yanit vermiyorsa vakit kaybetmemek icin tek HTTPS yedegi.
+                setFlow("HTTPS yedek", "MQTT kullanilamadi. Guvenli HTTPS 449 bir defa denenecek.");
+                try {
+                    int code = HttpsGatewayPublisher.publish(method, eventId, eventTs);
+                    long ok = System.currentTimeMillis();
+                    Prefs.p(this).edit().putLong("last_trigger_ms", ok)
+                            .putString("last_trigger_method", method).apply();
+                    setFlow("HTTPS basarili", method + " -> HTTPS 449 HTTP " + code);
+                    return;
+                } catch (Exception e) {
+                    httpsError = e;
+                    String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                    setFlow("HTTPS yedek hata", "HTTPS 449: " + msg);
+                }
 
-                String targetSsid = Prefs.ssid(this);
-                long wifiDeadline = System.currentTimeMillis() + WIFI_FALLBACK_WAIT_MS;
-                boolean homeWifiReady = false;
-
-                setFlow("Ev Wi‑Fi bekleniyor",
-                        "HTTPS 3 deneme başarısız. MQTT'yi bağlantı geçişinde kaçırmamak için "
-                                + targetSsid + " en fazla 90 sn bekleniyor.");
-
-                while (System.currentTimeMillis() < wifiDeadline) {
-                    try {
-                        String curSsid = currentSsid();
-                        boolean prefTarget = Prefs.p(this).getBoolean("wifi_target", false);
-                        if ((!targetSsid.isEmpty() && targetSsid.equals(curSsid)) || prefTarget) {
-                            homeWifiReady = true;
+                // Aractan inerken telefon Wi-Fi'ye henuz baglanmamis olabilir.
+                // Mevcut 90 sn Wi-Fi bekleme korumasini surdurur.
+                if (!homeWifi) {
+                    setFlow("Ev Wi-Fi bekleniyor", "MQTT/HTTPS ulasilamadi. Ev Wi-Fi en fazla 90 sn bekleniyor.");
+                    long until = System.currentTimeMillis() + WIFI_FALLBACK_WAIT_MS;
+                    while (System.currentTimeMillis() < until) {
+                        if (!targetSsid.isEmpty() && targetSsid.equals(currentSsid())) {
+                            homeWifi = true;
                             break;
                         }
-                    } catch (Exception ignored) {}
-                    try { Thread.sleep(1000L); } catch (InterruptedException ignored) {}
-                }
-
-                if (!homeWifiReady) {
-                    try {
-                        String curSsid = currentSsid();
-                        boolean prefTarget = Prefs.p(this).getBoolean("wifi_target", false);
-                        homeWifiReady = (!targetSsid.isEmpty() && targetSsid.equals(curSsid)) || prefTarget;
-                    } catch (Exception ignored) {}
-                }
-
-                if (homeWifiReady) {
-                    setFlow("Ev Wi‑Fi bağlı - MQTT yedek",
-                            targetSsid + " bağlandı. MQTT QoS1 gönderimi şimdi yapılıyor; PUBACK gelmeden başarılı sayılmayacak.");
-
-                    for (int attempt = 1; attempt <= 3; attempt++) {
-                        try {
-                            MqttPublisher.publish(
-                                    Prefs.host(this),
-                                    Prefs.port(this),
-                                    Prefs.user(this),
-                                    Prefs.pass(this),
-                                    Prefs.topic(this),
-                                    payload
-                            );
-                            long ok = System.currentTimeMillis();
-                            Prefs.p(this).edit()
-                                    .putLong("last_trigger_ms", ok)
-                                    .putString("last_trigger_method", method)
-                                    .apply();
-                            setFlow("MQTT yedek gönderildi",
-                                    method + " -> " + targetSsid
-                                            + " üzerinden MQTT QoS1/PUBACK başarılı (deneme "
-                                            + attempt + ")");
-                            return;
-                        } catch (Exception e) {
-                            lastErr = e;
-                            setFlow("MQTT yedek denemesi hata",
-                                    "Ev Wi‑Fi bağlı; MQTT deneme " + attempt
-                                            + " hata: " + e.getMessage());
-                            try { Thread.sleep(2000L); } catch (InterruptedException ignored) {}
+                        try { Thread.sleep(1000L); } catch (InterruptedException ignored) {}
+                    }
+                    if (homeWifi) {
+                        for (int attempt = 1; attempt <= 3; attempt++) {
+                            try {
+                                MqttPublisher.publish(this, true,
+                                        Prefs.host(this), Prefs.port(this), Prefs.user(this),
+                                        Prefs.pass(this), Prefs.topic(this), payload);
+                                long ok = System.currentTimeMillis();
+                                Prefs.p(this).edit().putLong("last_trigger_ms", ok)
+                                        .putString("last_trigger_method", method).apply();
+                                setFlow("MQTT Wi-Fi sonradan basarili", "Ev Wi-Fi geldi, PUBACK alindi; deneme " + attempt);
+                                return;
+                            } catch (Exception e) {
+                                mqttError = e;
+                                String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                                setFlow("Wi-Fi MQTT hata", "Deneme " + attempt + "/3: " + msg);
+                                if (attempt < 3) {
+                                    try { Thread.sleep(1400L); } catch (InterruptedException ignored) {}
+                                }
+                            }
                         }
                     }
-
-                    setFlow("Gönderilemedi",
-                            lastErr == null
-                                    ? "Ev Wi‑Fi bağlandı fakat MQTT gönderilemedi."
-                                    : "Ev Wi‑Fi bağlandı fakat MQTT gönderilemedi: " + lastErr.getMessage());
-                } else {
-                    setFlow("Ev Wi‑Fi 90 sn içinde gelmedi",
-                            targetSsid + " 90 sn içinde bağlanmadı. Kör MQTT gönderimi yapılmadı. "
-                                    + "Wi‑Fi daha sonra geri bağlanırsa mevcut Wi‑Fi eve-giriş adayı ayrıca çalışacaktır.");
                 }
+                String mqttReason = mqttError == null ? "denenmedi"
+                        : (mqttError.getMessage() == null ? mqttError.getClass().getSimpleName() : mqttError.getMessage());
+                String httpsReason = httpsError == null ? "denenmedi"
+                        : (httpsError.getMessage() == null ? httpsError.getClass().getSimpleName() : httpsError.getMessage());
+                setFlow("Gonderilemedi", "MQTT: " + mqttReason + " | HTTPS: " + httpsReason
+                        + ". Ev-giris kilidi BASLATILMADI; basarisiz gonderim kabul edilmedi.");
             } finally {
                 sending.set(false);
                 Prefs.p(this).edit().putBoolean("mqtt_sending", false).apply();
             }
-        }, "https-trigger").start();
+        }, "eve-giris-mqtt-first").start();
     }
 
     private synchronized void expireTimedWindows() {
