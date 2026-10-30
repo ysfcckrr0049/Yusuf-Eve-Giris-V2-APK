@@ -44,6 +44,7 @@ import java.util.Locale;
 
 public class MainActivity extends Activity {
     private EditText host, port, user, pass, topic, ssid, carBtName, radius;
+    private EditText wanHost, wanPort, wanUser, wanPass;
     private TextView homeText, mapInfo, stageText, treeText, statusText, eventLogText;
     private LinearLayout visualFlow;
     private TextView realNetworkTestResult;
@@ -103,14 +104,14 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("YUSUF EVE GİRİŞ V7.4.2");
+        title.setText("YUSUF EVE GİRİŞ V8.0 • TEK WAN");
         title.setTextSize(24f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setPadding(0, 0, 0, dp(8));
         root.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("HTTPS 449 + TLS pin + HMAC\nHaritalı ev alanı + Ysf Golf6 + Wi‑Fi + Android Auto + şarj\nV7.4.2: olay bazlı konum + 3 gerçek bağlantı testi");
+        sub.setText("Tek MQTT/TLS WAN oturumu • 120 sn keepalive\nWi-Fi, Golf6, Android Auto olay bazlı GPS • düşük pil tüketimi\nWAN bağlantısı açılır/koparsa bir kez bildirim");
         root.addView(sub);
 
         root.addView(label("Ev Alanı Haritası"));
@@ -142,11 +143,43 @@ public class MainActivity extends Activity {
         root.addView(button("ŞU ANKİ KONUMU EV YAP", v -> setCurrentAsHome()));
         root.addView(button("HARİTAYI EV KONUMUNA ORTALA", v -> centerHome()));
 
-        root.addView(label("MQTT Sunucu (LAN / Tailscale)"));
-        host = edit("192.168.7.129"); root.addView(host);
-        port = edit("1883"); port.setInputType(InputType.TYPE_CLASS_NUMBER); root.addView(port);
-        user = edit("MQTT kullanıcı adı"); root.addView(user);
-        pass = edit("MQTT parola"); pass.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD); root.addView(pass);
+        root.addView(label("YENİ V8 — TEK WAN MQTT / TLS"));
+        TextView wanHelp = new TextView(this);
+        wanHelp.setText("Wi-Fi / mobil veri fark etmez. Güvenilir sertifikalı genel MQTT alan adı (8883) gerekir.\nSunucu tanımlanana kadar eski V7.4.2 otomasyonu korunur.");
+        root.addView(wanHelp);
+        wanHost = edit("mqtt.ornekalanadi.com"); root.addView(wanHost);
+        wanPort = edit("8883"); wanPort.setInputType(InputType.TYPE_CLASS_NUMBER); root.addView(wanPort);
+        wanUser = edit("WAN MQTT kullanıcı adı"); root.addView(wanUser);
+        wanPass = edit("WAN MQTT şifresi");
+        wanPass.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        root.addView(wanPass);
+        root.addView(button("WAN AYARLARINI KAYDET VE BAĞLAN", v -> {
+            save();
+            if (!Prefs.wanConfigured(this)) {
+                toast("WAN için geçerli TLS sunucu alan adı, kullanıcı adı ve şifre gerekli");
+                return;
+            }
+            Prefs.p(this).edit().putBoolean("wan_enabled", true).apply();
+            Intent service = new Intent(this, MonitorService.class);
+            service.setAction(MonitorService.ACTION_WAN_RESTART);
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(service); else startService(service);
+            toast("WAN TLS bağlanıyor. LAN/VPN/HTTPS yedeği devre dışı.");
+            refreshStatus();
+        }));
+        root.addView(button("WAN OTURUMUNU KAPAT / ESKİ SİSTEME DÖN", v -> {
+            Prefs.p(this).edit().putBoolean("wan_enabled", false).apply();
+            Intent service = new Intent(this, MonitorService.class);
+            service.setAction(MonitorService.ACTION_WAN_RESTART);
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(service); else startService(service);
+            toast("WAN kapatıldı; V7.4.2 ayarları duruyor");
+            refreshStatus();
+        }));
+        root.addView(label("MQTT OLAY KONUSU"));
+        // Legacy MQTT transport settings kept only for rollback.
+        host = edit("192.168.7.129"); /* V8 hidden old transport */
+        port = edit("1883"); port.setInputType(InputType.TYPE_CLASS_NUMBER); /* V8 hidden old transport */
+        user = edit("MQTT kullanıcı adı"); /* V8 hidden old transport */
+        pass = edit("MQTT parola"); pass.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD); /* V8 hidden old transport */
         topic = edit("ev/telefon/yusuf/eve_geldi"); root.addView(topic);
 
         root.addView(label("Ev Wi‑Fi"));
@@ -177,19 +210,6 @@ public class MainActivity extends Activity {
         }));
         root.addView(button("ZAMAN AŞIMI / GÜVENLİK AYARLARI", v -> startActivity(new Intent(this, TimingSettingsActivity.class))));
         root.addView(button("ARKA PLAN KONUM İZNİ AYARLARI", v -> openAppSettings()));
-        root.addView(button("HTTPS 449 GÜVENLİ BAĞLANTI TESTİ", v -> testHttpsSafe()));
-        root.addView(button("MQTT YEDEK BAĞLANTI TESTİ", v -> testMqtt()));
-        // YUSUF_TEST_V742_BEGIN - Gercek baglanti testleri: ev giris otomasyonunu tetiklemez.
-        root.addView(label("GERÇEK AĞ TESTLERİ (TETİKLEME YOK)"));
-        root.addView(button("GERÇEK TEST: TAILSCALE / MQTT QoS1", v -> runRealNetworkTest("TAILSCALE")));
-        root.addView(button("GERÇEK TEST: LAN / MQTT QoS1", v -> runRealNetworkTest("LAN")));
-        root.addView(button("GERÇEK TEST: WAN / HTTPS 449", v -> runRealNetworkTest("WAN")));
-        realNetworkTestResult = new TextView(this);
-        realNetworkTestResult.setText("Henüz bağlantı testi yapılmadı. Testler ayrı tanı konusu kullanır; ışık çalıştırmaz.");
-        realNetworkTestResult.setTextIsSelectable(true);
-        realNetworkTestResult.setPadding(dp(10), dp(12), dp(10), dp(12));
-        root.addView(realNetworkTestResult);
-        // YUSUF_TEST_V742_END
         root.addView(button("İZLEMEYİ BAŞLAT", v -> startMonitor()));
         root.addView(button("KONUMU ŞİMDİ TAZELE (YÜKSEK DOĞRULUK)", v -> sendServiceAction(MonitorService.ACTION_FORCE_LOCATION)));
         root.addView(button("İZLEMEYİ DURDUR", v -> stopMonitor()));
@@ -305,6 +325,10 @@ public class MainActivity extends Activity {
     }
 
     private void load() {
+        wanHost.setText(Prefs.wanHost(this));
+        wanPort.setText(String.valueOf(Prefs.wanPort(this)));
+        wanUser.setText(Prefs.wanUser(this));
+        wanPass.setText(Prefs.wanPassword(this));
         host.setText(Prefs.host(this));
         port.setText(String.valueOf(Prefs.port(this)));
         user.setText(Prefs.user(this));
@@ -327,6 +351,15 @@ public class MainActivity extends Activity {
         float r;
         try { p = Integer.parseInt(port.getText().toString().trim()); } catch (Exception e) { p = 1883; }
         r = radiusFromUi();
+        int wp;
+        try { wp = Integer.parseInt(wanPort.getText().toString().trim()); }
+        catch (Exception e) { wp = 8883; }
+        Prefs.p(this).edit()
+                .putString("wan_host", wanHost.getText().toString().trim())
+                .putInt("wan_port", wp)
+                .putString("wan_user", wanUser.getText().toString().trim())
+                .putString("wan_password", wanPass.getText().toString())
+                .apply();
         Prefs.p(this).edit()
                 .putString("mqtt_host", host.getText().toString().trim())
                 .putInt("mqtt_port", p)
@@ -933,6 +966,12 @@ public class MainActivity extends Activity {
         long pendingAt = p.getLong("event_pending_ms", 0L);
         long pendingLeft = pendingAt == 0 ? 0 : Math.max(0, Prefs.candidateTimeoutMs(this) - (System.currentTimeMillis() - pendingAt));
         String s =
+                "WAN modu: " + (Prefs.wanEnabled(this) ? "AKTİF" : "KAPALI (V7.4.2)") +
+                "\nWAN broker: " + (Prefs.wanHost(this).isEmpty() ? "TANIMLANMADI" : Prefs.wanHost(this)) + ":" + Prefs.wanPort(this) +
+                "\nWAN bağlantı: " + (p.getBoolean("wan_connected", false) ? "BAĞLI" : "BAĞLI DEĞİL") +
+                "\nWAN durum: " + p.getString("wan_status", "Henüz test edilmedi") +
+                "\nHA ACK son: " + p.getString("wan_last_ha_ack", "Henüz yok") +
+                "\nKeepalive: 120 sn (boşta PINGREQ/PINGRESP)\n" +
                 "Servis: " + (Prefs.serviceEnabled(this) ? "AÇIK" : "KAPALI") +
                 "\nMQTT: " + Prefs.host(this) + ":" + Prefs.port(this) +
                 "\nTopic: " + Prefs.topic(this) +

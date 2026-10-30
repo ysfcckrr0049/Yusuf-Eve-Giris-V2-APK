@@ -82,11 +82,20 @@ public class MonitorService extends Service {
     private volatile String callbackSsid = "";
     private ConnectivityManager.NetworkCallback wifiCallback;
     private final AtomicBoolean sending = new AtomicBoolean(false);
+    // WAN_V8_PATCH_BEGIN: tek surekli TLS MQTT oturumu.
+    public static final String ACTION_WAN_RESTART = "com.yusuf.evegiris.WAN_RESTART";
+    private WanMqttManager wanManager;
+    private long lastWanCheckMs = 0L;
+    // WAN_V8_PATCH_END
     private final Handler timeoutHandler = new Handler(Looper.getMainLooper());
     private final Runnable timeoutTick = new Runnable() {
         @Override public void run() {
             try {
                 expireTimedWindows();
+                if (wanManager != null && System.currentTimeMillis() - lastWanCheckMs >= 30000L) {
+                    lastWanCheckMs = System.currentTimeMillis();
+                    wanManager.ensureConnected();
+                }
             } finally {
                 timeoutHandler.postDelayed(this, 1000L);
             }
@@ -201,6 +210,10 @@ public class MonitorService extends Service {
         initWifi();
         Prefs.p(this).edit().putString("location_engine", "EVENT_ONLY_FUSED_HIGH_ACCURACY").apply();
         // Surekli GPS istegi yok: Wi-Fi, Golf6 BT veya Android Auto kopusuyla istenir.
+        // Servis zaten konum tipi foreground; ek wake lock / sik ping yok.
+        wanManager = new WanMqttManager(this, (online, detail) ->
+                updateNotification(online ? "WAN MQTT bağlı" : "WAN MQTT kesildi"));
+        if (Prefs.wanEnabled(this)) wanManager.start();
         timeoutHandler.post(timeoutTick);
         setFlow("Servis başlatıldı", "Başlangıç koruması=" + Prefs.startupGraceMinutes(this) + " dk. Zaman aşımı denetleyicisi aktif.");
     }
@@ -775,6 +788,35 @@ public class MonitorService extends Service {
             return;
         }
 
+        // WAN secilince LAN, VPN ve eski HTTPS yoluna kesinlikle donulmez.
+        if (Prefs.wanEnabled(this)) {
+            Prefs.p(this).edit().putBoolean("mqtt_sending", true).apply();
+            setFlow("WAN MQTT gönderimi", "QoS1 ile tek WAN TLS oturumundan gönderiliyor.");
+            new Thread(() -> {
+                String eventId = java.util.UUID.randomUUID().toString();
+                long eventTs = System.currentTimeMillis();
+                String payload = "{\"event\":\"YUSUF_EVE_GELDI\",\"method\":\""
+                        + escape(method) + "\",\"ts\":" + eventTs
+                        + ",\"source\":\"YusufEveGirisAPK\",\"event_id\":\""
+                        + eventId + "\"}";
+                try {
+                    if (wanManager == null) throw new java.io.IOException("WAN servisi hazir degil");
+                    wanManager.publish(payload);
+                    long accepted = System.currentTimeMillis();
+                    Prefs.p(this).edit().putLong("last_trigger_ms", accepted)
+                            .putString("last_trigger_method", method).apply();
+                    setFlow("WAN BROKER PUBACK", "QoS1 broker onayi alindi. HA son islemi ayri ACK ile dogrular. event_id=" + eventId);
+                } catch (Exception e) {
+                    String detail = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                    setFlow("WAN gonderim hatasi", detail + "; tek WAN kullaniminda LAN/VPN yedegi yok");
+                } finally {
+                    sending.set(false);
+                    Prefs.p(this).edit().putBoolean("mqtt_sending", false).apply();
+                }
+            }, "wan-mqtt-event").start();
+            return;
+        }
+
         Prefs.p(this).edit().putBoolean("mqtt_sending", true).apply();
         setFlow("MQTT gönderimi başladı", method + " için MQTT QoS1 gonderimi başlatıldı; HTTPS yedek.");
 
@@ -1032,6 +1074,14 @@ public class MonitorService extends Service {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
+        if (ACTION_WAN_RESTART.equals(action)) {
+            if (wanManager == null) wanManager = new WanMqttManager(this,
+                    (online, detail) -> updateNotification(online ? "WAN MQTT bağlı" : "WAN MQTT kesildi"));
+            wanManager.start();
+            setFlow("WAN AYARLARI", Prefs.wanEnabled(this)
+                    ? "WAN MQTT/TLS yeniden bağlanıyor" : "WAN kapalı; eski sistem korunuyor");
+            return START_STICKY;
+        }
         if (ACTION_FORCE_LOCATION.equals(action)) {
             setFlow("MANUEL TAZE KONUM", "Kullanıcı yüksek doğruluklu taze konum istedi.");
             requestFreshLocation("manuel_buton", false);
@@ -1043,6 +1093,7 @@ public class MonitorService extends Service {
 
     @Override public void onDestroy() {
         timeoutHandler.removeCallbacksAndMessages(null);
+        if (wanManager != null) wanManager.stop();
         try { unregisterReceiver(receiver); } catch (Exception ignored) {}
         locationRequestSerial++;
         if (activeLocationToken != null) activeLocationToken.cancel();
