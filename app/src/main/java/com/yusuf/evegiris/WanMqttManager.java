@@ -144,6 +144,11 @@ public final class WanMqttManager {
                 }
                 return socket;
             }
+            // Paho creates an unconnected SSL socket before connecting it.
+            // SocketFactory's inherited createSocket() otherwise throws.
+            @Override public java.net.Socket createSocket() throws IOException {
+                return checkEndpoint(trusted.createSocket());
+            }
             @Override public String[] getDefaultCipherSuites() {
                 return trusted.getDefaultCipherSuites();
             }
@@ -196,11 +201,8 @@ public final class WanMqttManager {
         } catch (Exception e) {
             throw new IllegalStateException("WAN TLS guven sertifikasi yuklenemedi", e);
         }
-        // Will is sent by broker if the TCP/TLS session disappears unexpectedly.
-        if (!diagnostic) {
-            o.setWill(Prefs.topic(app) + "/status",
-                    "offline".getBytes(StandardCharsets.UTF_8), 1, false);
-        }
+        // The isolated broker authorizes arrival publishing and ACK reading.
+        // Do not register a Will to an unauthorized /status topic at CONNECT.
         return o;
     }
 
