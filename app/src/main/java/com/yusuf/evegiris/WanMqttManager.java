@@ -10,6 +10,8 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Build;
+import android.net.ConnectivityManager;
+import android.net.Network;
 
 import org.eclipse.paho.client.mqttv3.IMqttActionListener;
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
@@ -39,6 +41,10 @@ public final class WanMqttManager {
     private final StatusListener statusListener;
     private final Object connectionMonitor = new Object();
     private volatile MqttAsyncClient client;
+    private ConnectivityManager networkManager;
+    private ConnectivityManager.NetworkCallback networkCallback;
+    private volatile Network activeDefaultNetwork;
+    private volatile long networkEpoch = 0L;
     private volatile boolean stopped = true;
     private volatile long lastConnectTry = 0L;
     private volatile int lastState = -1;
@@ -127,10 +133,52 @@ public final class WanMqttManager {
         tmf.init(ks);
         javax.net.ssl.SSLContext ssl = javax.net.ssl.SSLContext.getInstance("TLS");
         ssl.init(null, tmf.getTrustManagers(), null);
-        return ssl.getSocketFactory();
+        final javax.net.ssl.SSLSocketFactory trusted = ssl.getSocketFactory();
+        return new javax.net.ssl.SSLSocketFactory() {
+            private java.net.Socket checkEndpoint(java.net.Socket socket) {
+                if (socket instanceof javax.net.ssl.SSLSocket) {
+                    javax.net.ssl.SSLSocket tls = (javax.net.ssl.SSLSocket) socket;
+                    javax.net.ssl.SSLParameters parameters = tls.getSSLParameters();
+                    parameters.setEndpointIdentificationAlgorithm("HTTPS");
+                    tls.setSSLParameters(parameters);
+                }
+                return socket;
+            }
+            @Override public String[] getDefaultCipherSuites() {
+                return trusted.getDefaultCipherSuites();
+            }
+            @Override public String[] getSupportedCipherSuites() {
+                return trusted.getSupportedCipherSuites();
+            }
+            @Override public java.net.Socket createSocket(java.net.Socket s, String h, int p,
+                                                          boolean autoclose) throws IOException {
+                return checkEndpoint(trusted.createSocket(s, h, p, autoclose));
+            }
+            @Override public java.net.Socket createSocket(String h, int p) throws IOException {
+                return checkEndpoint(trusted.createSocket(h, p));
+            }
+            @Override public java.net.Socket createSocket(java.net.InetAddress h, int p)
+                    throws IOException {
+                return checkEndpoint(trusted.createSocket(h, p));
+            }
+            @Override public java.net.Socket createSocket(String h, int p,
+                                                          java.net.InetAddress local, int lp)
+                    throws IOException {
+                return checkEndpoint(trusted.createSocket(h, p, local, lp));
+            }
+            @Override public java.net.Socket createSocket(java.net.InetAddress h, int p,
+                                                          java.net.InetAddress local, int lp)
+                    throws IOException {
+                return checkEndpoint(trusted.createSocket(h, p, local, lp));
+            }
+        };
     }
 
     private MqttConnectOptions connectionOptions() {
+        return connectionOptions(false);
+    }
+
+    private MqttConnectOptions connectionOptions(boolean diagnostic) {
         MqttConnectOptions o = new MqttConnectOptions();
         o.setUserName(Prefs.wanUser(app));
         o.setPassword(Prefs.wanPassword(app).toCharArray());
@@ -147,9 +195,57 @@ public final class WanMqttManager {
             throw new IllegalStateException("WAN TLS guven sertifikasi yuklenemedi", e);
         }
         // Will is sent by broker if the TCP/TLS session disappears unexpectedly.
-        o.setWill(Prefs.topic(app) + "/status",
-                "offline".getBytes(StandardCharsets.UTF_8), 1, false);
+        if (!diagnostic) {
+            o.setWill(Prefs.topic(app) + "/status",
+                    "offline".getBytes(StandardCharsets.UTF_8), 1, false);
+        }
         return o;
+    }
+
+    /** Android varsayilan agi Wi-Fi/mobil olarak degisince eski TCP oturumu birakilir. */
+    private synchronized void watchDefaultNetwork() {
+        if (networkCallback != null) return;
+        final ConnectivityManager manager = (ConnectivityManager)
+                app.getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (manager == null) return;
+        networkManager = manager;
+        activeDefaultNetwork = manager.getActiveNetwork();
+        ConnectivityManager.NetworkCallback cb = new ConnectivityManager.NetworkCallback() {
+            @Override public void onAvailable(Network network) {
+                defaultNetworkChanged(this, network);
+            }
+            @Override public void onLost(Network network) {
+                if (network != null && network.equals(activeDefaultNetwork)) {
+                    defaultNetworkChanged(this, null);
+                }
+            }
+        };
+        networkCallback = cb;
+        try {
+            manager.registerDefaultNetworkCallback(cb);
+        } catch (Exception e) {
+            networkCallback = null;
+            networkManager = null;
+            Prefs.addEvent(app, "WAN AĞ İZLEME", "Ag callback: " + safeError(e));
+        }
+    }
+
+    private synchronized void defaultNetworkChanged(ConnectivityManager.NetworkCallback source,
+                                                     Network next) {
+        if (stopped || source != networkCallback) return;
+        Network previous = activeDefaultNetwork;
+        if (previous == next || (previous != null && previous.equals(next))) return;
+        activeDefaultNetwork = next;
+        final long version = ++networkEpoch;
+        Prefs.addEvent(app, "WAN AĞ DEĞİŞTİ", "Wi-Fi / mobil veri gecisi; yeni TLS el sikisma");
+        new Thread(() -> {
+            synchronized (WanMqttManager.this) {
+                if (stopped || source != networkCallback || version != networkEpoch) return;
+                transition(false, "Ag degisti; yeni MQTT/TLS el sikismasi basliyor");
+                // Force a fresh SSL session and MQTT CONNECT on the newly selected default network.
+                start();
+            }
+        }, "yusuf-v82-network-rehandshake").start();
     }
 
     public synchronized void start() {
@@ -161,6 +257,7 @@ public final class WanMqttManager {
             return;
         }
         stopped = false;
+        watchDefaultNetwork();
         try {
             final MqttAsyncClient c = new MqttAsyncClient(
                     "ssl://" + host + ":" + Prefs.wanPort(app),
@@ -228,6 +325,41 @@ public final class WanMqttManager {
         }
     }
 
+    /** Independent, real MQTT/TLS session: never sends an arrival event. */
+    public static String liveTest(Context context, boolean publishProbe) throws Exception {
+        if (!Prefs.wanConfigured(context))
+            throw new IOException("Statik WAN IP / kullanıcı / şifre eksik");
+        WanMqttManager helper = new WanMqttManager(context, null);
+        MqttAsyncClient testClient = new MqttAsyncClient(
+                "ssl://" + Prefs.wanHost(context) + ":" + Prefs.wanPort(context),
+                "yusuf-v82-realtest-" + UUID.randomUUID().toString().substring(0, 12),
+                new MemoryPersistence());
+        try {
+            MqttConnectOptions opts = helper.connectionOptions(true);
+            opts.setAutomaticReconnect(false);
+            testClient.connect(opts).waitForCompletion(14000);
+            if (!testClient.isConnected()) throw new IOException("MQTT CONNACK başarısız");
+            if (publishProbe) {
+                // ACL permits only the special probe topic. Never publish to the arrival topic.
+                String probe = "v82-test:" + UUID.randomUUID();
+                IMqttDeliveryToken sent = testClient.publish("yusuf_v81_probe/up",
+                        probe.getBytes(StandardCharsets.UTF_8), 1, false);
+                sent.waitForCompletion(12000);
+                return "BAŞARILI: Gerçek TLS + MQTT CONNACK + QoS1 PUBACK alındı. "
+                        + "Test konusu: yusuf_v81_probe/up. Eve giriş tetiklenmedi. "
+                        + "(HA ACK ayrı doğrulanır.)";
+            }
+            IMqttToken subscription = testClient.subscribe(Prefs.topic(context) + "/ack", 1);
+            subscription.waitForCompletion(9000);
+            return "BAŞARILI: Gerçek TLS sertifika kontrolü, MQTT CONNACK ve ACK aboneliği tamam.";
+        } finally {
+            try {
+                if (testClient.isConnected()) testClient.disconnect().waitForCompletion(4000);
+            } catch (Exception ignored) { }
+            try { testClient.close(); } catch (Exception ignored) { }
+        }
+    }
+
     /** Called from an existing worker thread, never from Android's UI thread. */
     public void publish(String payload) throws Exception {
         ensureConnected();
@@ -246,6 +378,14 @@ public final class WanMqttManager {
 
     public synchronized void stop() {
         stopped = true;
+        ++networkEpoch;
+        if (networkManager != null && networkCallback != null) {
+            try { networkManager.unregisterNetworkCallback(networkCallback); }
+            catch (Exception ignored) { }
+        }
+        networkCallback = null;
+        networkManager = null;
+        activeDefaultNetwork = null;
         MqttAsyncClient old = client;
         client = null;
         if (old != null) {

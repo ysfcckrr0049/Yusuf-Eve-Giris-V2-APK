@@ -45,6 +45,9 @@ import java.util.Locale;
 public class MainActivity extends Activity {
     private EditText host, port, user, pass, topic, ssid, carBtName, radius;
     private EditText wanHost, wanPort, wanUser, wanPass;
+    private TextView wanLiveTestResult;
+    private final java.util.concurrent.atomic.AtomicBoolean wanLiveTestRunning =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
     private TextView homeText, mapInfo, stageText, treeText, statusText, eventLogText;
     private LinearLayout visualFlow;
     private TextView realNetworkTestResult;
@@ -104,7 +107,7 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("YUSUF EVE GİRİŞ V8.1 • STATİK IP WAN");
+        title.setText("YUSUF EVE GİRİŞ V8.2 • GERÇEK MQTT");
         title.setTextSize(24f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setPadding(0, 0, 0, dp(8));
@@ -149,10 +152,16 @@ public class MainActivity extends Activity {
         root.addView(wanHelp);
         wanHost = edit("95.70.192.182"); root.addView(wanHost);
         wanPort = edit("8883"); wanPort.setInputType(InputType.TYPE_CLASS_NUMBER); root.addView(wanPort);
-        wanUser = edit("WAN MQTT kullanıcı adı"); root.addView(wanUser);
+        wanUser = edit("yusuf_telefon_v81"); root.addView(wanUser);
         wanPass = edit("WAN MQTT şifresi");
         wanPass.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         root.addView(wanPass);
+        root.addView(button("GERÇEK TEST 1 — TLS + MQTT BAĞLAN", v -> runWanLiveTest(false)));
+        root.addView(button("GERÇEK TEST 2 — QOS 1 MESAJ GÖNDER (ZARARSIZ)", v -> runWanLiveTest(true)));
+        wanLiveTestResult = new TextView(this);
+        wanLiveTestResult.setText("Testler gerçek MQTT/TLS oturumu kullanır. Eve giriş tetiklenmez.");
+        wanLiveTestResult.setPadding(0, dp(8), 0, dp(12));
+        root.addView(wanLiveTestResult);
         root.addView(button("WAN AYARLARINI KAYDET VE BAĞLAN", v -> {
             save();
             if (!Prefs.wanConfigured(this)) {
@@ -322,6 +331,39 @@ public class MainActivity extends Activity {
 
     private String coord(GeoPoint p) {
         return String.format(Locale.US, "%.6f, %.6f", p.getLatitude(), p.getLongitude());
+    }
+
+    /** Gercek TLS/MQTT CONNECT ve ayrica QoS1 zararsiz test yayini. */
+    private void runWanLiveTest(boolean publishProbe) {
+        if (!wanLiveTestRunning.compareAndSet(false, true)) {
+            toast("MQTT testi halen devam ediyor");
+            return;
+        }
+        save();
+        if (!Prefs.wanConfigured(this)) {
+            wanLiveTestRunning.set(false);
+            wanLiveTestResult.setText("Önce WAN şifresini gir. Kullanıcı adı hazırdır.");
+            return;
+        }
+        wanLiveTestResult.setText(publishProbe
+                ? "Gerçek TLS bağlantısı + QoS1 test yayını deneniyor..."
+                : "Gerçek TLS ve MQTT kimlik doğrulaması deneniyor...");
+        new Thread(() -> {
+            String result;
+            try {
+                result = WanMqttManager.liveTest(getApplicationContext(), publishProbe);
+            } catch (Exception e) {
+                String d = e.getMessage();
+                result = "BAŞARISIZ: " + (d == null ? e.getClass().getSimpleName() : d);
+            }
+            final String display = result;
+            Prefs.addEvent(getApplicationContext(), "GERÇEK WAN TESTİ", display);
+            runOnUiThread(() -> {
+                wanLiveTestRunning.set(false);
+                if (wanLiveTestResult != null) wanLiveTestResult.setText(display);
+                refreshStatus();
+            });
+        }, "yusuf-v82-gercek-mqtt-test").start();
     }
 
     private void load() {

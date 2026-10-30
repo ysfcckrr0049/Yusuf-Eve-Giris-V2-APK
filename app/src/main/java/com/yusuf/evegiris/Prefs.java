@@ -18,7 +18,11 @@ public final class Prefs {
     // V8 WAN: guvenilir TLS alan adi, ayri WAN kullanici ve sifresi.
     public static String wanHost(Context c) { return p(c).getString("wan_host", "95.70.192.182"); }
     public static int wanPort(Context c) { return p(c).getInt("wan_port", 8883); }
-    public static String wanUser(Context c) { return p(c).getString("wan_user", ""); }
+    public static String wanUser(Context c) {
+        String configured = p(c).getString("wan_user", "");
+        return configured == null || configured.trim().isEmpty()
+                ? "yusuf_telefon_v81" : configured.trim();
+    }
     public static String wanPassword(Context c) { return p(c).getString("wan_password", ""); }
     public static boolean wanEnabled(Context c) { return p(c).getBoolean("wan_enabled", false); }
     public static boolean wanConfigured(Context c) {
