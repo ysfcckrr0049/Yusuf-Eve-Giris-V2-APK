@@ -16,18 +16,18 @@ public final class Prefs {
     }
 
     // V8 WAN: guvenilir TLS alan adi, ayri WAN kullanici ve sifresi.
-    public static String wanHost(Context c) { return p(c).getString("wan_host", ""); }
+    public static String wanHost(Context c) { return p(c).getString("wan_host", "95.70.192.182"); }
     public static int wanPort(Context c) { return p(c).getInt("wan_port", 8883); }
     public static String wanUser(Context c) { return p(c).getString("wan_user", ""); }
     public static String wanPassword(Context c) { return p(c).getString("wan_password", ""); }
     public static boolean wanEnabled(Context c) { return p(c).getBoolean("wan_enabled", false); }
     public static boolean wanConfigured(Context c) {
         String host = wanHost(c).trim();
-        // Internet MQTT brokeri icin genel DNS adi zorunlu, yerel IP kabul edilmez.
-        return host.contains(".") && !host.contains("/") && !host.contains(":")
-                && !host.contains(" ") && !host.matches("[0-9.]+")
+        // Bu ozel CA sertifikasi yalnizca 95.70.192.182 IP SAN icin duzenlendi.
+        // Baska host/dns kabul edilmez; SSL endpoint kimligi ayrica dogrulanir.
+        return "95.70.192.182".equals(host)
                 && !wanUser(c).trim().isEmpty() && !wanPassword(c).isEmpty()
-                && wanPort(c) >= 1 && wanPort(c) <= 65535;
+                && wanPort(c) == 8883;
     }
 
     public static String host(Context c) { return p(c).getString("mqtt_host", "192.168.7.129"); }

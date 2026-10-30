@@ -111,6 +111,25 @@ public final class WanMqttManager {
         return id;
     }
 
+    private javax.net.ssl.SSLSocketFactory yusufPrivateCaSocketFactory() throws Exception {
+        java.security.cert.CertificateFactory cf =
+                java.security.cert.CertificateFactory.getInstance("X.509");
+        java.security.cert.Certificate root;
+        try (java.io.InputStream in = app.getAssets().open("yusuf_v8_wan_ca.pem")) {
+            root = cf.generateCertificate(in);
+        }
+        java.security.KeyStore ks = java.security.KeyStore.getInstance(
+                java.security.KeyStore.getDefaultType());
+        ks.load(null, null);
+        ks.setCertificateEntry("yusuf_v8_ca", root);
+        javax.net.ssl.TrustManagerFactory tmf = javax.net.ssl.TrustManagerFactory.getInstance(
+                javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm());
+        tmf.init(ks);
+        javax.net.ssl.SSLContext ssl = javax.net.ssl.SSLContext.getInstance("TLS");
+        ssl.init(null, tmf.getTrustManagers(), null);
+        return ssl.getSocketFactory();
+    }
+
     private MqttConnectOptions connectionOptions() {
         MqttConnectOptions o = new MqttConnectOptions();
         o.setUserName(Prefs.wanUser(app));
@@ -121,6 +140,12 @@ public final class WanMqttManager {
         o.setCleanSession(true);
         o.setMqttVersion(MqttConnectOptions.MQTT_VERSION_3_1_1);
         o.setHttpsHostnameVerificationEnabled(true);
+        // SADECE HA'da uretilen CA guvenilir: guvenlik kontrolunu ASLA kapatma.
+        try {
+            o.setSocketFactory(yusufPrivateCaSocketFactory());
+        } catch (Exception e) {
+            throw new IllegalStateException("WAN TLS guven sertifikasi yuklenemedi", e);
+        }
         // Will is sent by broker if the TCP/TLS session disappears unexpectedly.
         o.setWill(Prefs.topic(app) + "/status",
                 "offline".getBytes(StandardCharsets.UTF_8), 1, false);
@@ -197,7 +222,7 @@ public final class WanMqttManager {
                     if (!stopped) transition(false, "WAN TLS bağlanamadı: " + safeError(exception));
                 }
             });
-        } catch (MqttException e) {
+        } catch (Exception e) {
             // An in-progress automatic Paho reconnect can report CONNECT_IN_PROGRESS.
             if (!stopped && !c.isConnected()) transition(false, "WAN bekleniyor: " + safeError(e));
         }

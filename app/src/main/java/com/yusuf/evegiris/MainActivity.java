@@ -104,7 +104,7 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("YUSUF EVE GİRİŞ V8.0 • TEK WAN");
+        title.setText("YUSUF EVE GİRİŞ V8.1 • STATİK IP WAN");
         title.setTextSize(24f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setPadding(0, 0, 0, dp(8));
@@ -145,9 +145,9 @@ public class MainActivity extends Activity {
 
         root.addView(label("YENİ V8 — TEK WAN MQTT / TLS"));
         TextView wanHelp = new TextView(this);
-        wanHelp.setText("Wi-Fi / mobil veri fark etmez. Güvenilir sertifikalı genel MQTT alan adı (8883) gerekir.\nSunucu tanımlanana kadar eski V7.4.2 otomasyonu korunur.");
+        wanHelp.setText("Tek statik WAN IP: 95.70.192.182:8883.\nÖzel CA sertifikasıyla TLS doğrulanır. 120 sn keepalive.\nWAN açılana kadar eski ayarlar korunur.");
         root.addView(wanHelp);
-        wanHost = edit("mqtt.ornekalanadi.com"); root.addView(wanHost);
+        wanHost = edit("95.70.192.182"); root.addView(wanHost);
         wanPort = edit("8883"); wanPort.setInputType(InputType.TYPE_CLASS_NUMBER); root.addView(wanPort);
         wanUser = edit("WAN MQTT kullanıcı adı"); root.addView(wanUser);
         wanPass = edit("WAN MQTT şifresi");
@@ -156,7 +156,7 @@ public class MainActivity extends Activity {
         root.addView(button("WAN AYARLARINI KAYDET VE BAĞLAN", v -> {
             save();
             if (!Prefs.wanConfigured(this)) {
-                toast("WAN için geçerli TLS sunucu alan adı, kullanıcı adı ve şifre gerekli");
+                toast("WAN için 95.70.192.182:8883 ve MQTT kullanıcısı/şifresi gerekli");
                 return;
             }
             Prefs.p(this).edit().putBoolean("wan_enabled", true).apply();
