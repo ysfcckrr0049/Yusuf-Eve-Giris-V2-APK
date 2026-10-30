@@ -48,6 +48,7 @@ public class MainActivity extends Activity {
     private TextView wanLiveTestResult;
     private final java.util.concurrent.atomic.AtomicBoolean wanLiveTestRunning =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+    private volatile long wanLastTestTapMs = 0L;
     private TextView homeText, mapInfo, stageText, treeText, statusText, eventLogText;
     private LinearLayout visualFlow;
     private TextView realNetworkTestResult;
@@ -107,7 +108,7 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("YUSUF EVE GİRİŞ V8.2 • GERÇEK MQTT");
+        title.setText("YUSUF EVE GİRİŞ V8.3 • MQTT KARARLI");
         title.setTextSize(24f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setPadding(0, 0, 0, dp(8));
@@ -335,10 +336,16 @@ public class MainActivity extends Activity {
 
     /** Gercek TLS/MQTT CONNECT ve ayrica QoS1 zararsiz test yayini. */
     private void runWanLiveTest(boolean publishProbe) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - wanLastTestTapMs < 4000L) {
+            toast("Yeni testi 4 saniye sonra baslat");
+            return;
+        }
         if (!wanLiveTestRunning.compareAndSet(false, true)) {
             toast("MQTT testi halen devam ediyor");
             return;
         }
+        wanLastTestTapMs = now;
         save();
         if (!Prefs.wanConfigured(this)) {
             wanLiveTestRunning.set(false);
@@ -353,8 +360,7 @@ public class MainActivity extends Activity {
             try {
                 result = WanMqttManager.liveTest(getApplicationContext(), publishProbe);
             } catch (Exception e) {
-                String d = e.getMessage();
-                result = "BAŞARISIZ: " + (d == null ? e.getClass().getSimpleName() : d);
+                result = "BAŞARISIZ: " + WanMqttManager.explainError(e);
             }
             final String display = result;
             Prefs.addEvent(getApplicationContext(), "GERÇEK WAN TESTİ", display);

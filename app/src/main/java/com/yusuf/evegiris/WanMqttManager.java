@@ -184,7 +184,9 @@ public final class WanMqttManager {
         o.setPassword(Prefs.wanPassword(app).toCharArray());
         o.setKeepAliveInterval(KEEPALIVE_SECONDS);
         o.setConnectionTimeout(8);
-        o.setAutomaticReconnect(true);
+        // Tek yeniden baglanti yoneticisi: MonitorService 30 saniyede ensureConnected().
+        // Paho otomatik reconnect acikken ikinci c.connect() yarisi gorulebilir.
+        o.setAutomaticReconnect(false);
         o.setCleanSession(true);
         o.setMqttVersion(MqttConnectOptions.MQTT_VERSION_3_1_1);
         o.setHttpsHostnameVerificationEnabled(true);
@@ -239,13 +241,14 @@ public final class WanMqttManager {
         final long version = ++networkEpoch;
         Prefs.addEvent(app, "WAN AĞ DEĞİŞTİ", "Wi-Fi / mobil veri gecisi; yeni TLS el sikisma");
         new Thread(() -> {
+            try { Thread.sleep(1400L); }
+            catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
             synchronized (WanMqttManager.this) {
                 if (stopped || source != networkCallback || version != networkEpoch) return;
-                transition(false, "Ag degisti; yeni MQTT/TLS el sikismasi basliyor");
-                // Force a fresh SSL session and MQTT CONNECT on the newly selected default network.
+                transition(false, "Ag degisti; taze TCP/TLS + MQTT CONNECT basliyor");
                 start();
             }
-        }, "yusuf-v82-network-rehandshake").start();
+        }, "yusuf-v83-network-rehandshake").start();
     }
 
     public synchronized void start() {
@@ -325,6 +328,54 @@ public final class WanMqttManager {
         }
     }
 
+    /** Java TLS + MQTT 3.1.1 dogrudan CONNECT. No publish, no arrival, no HA trigger. */
+    private String rawMqttConnectProbe() throws Exception {
+        final String host = Prefs.wanHost(app);
+        final int port = Prefs.wanPort(app);
+        final javax.net.ssl.SSLSocketFactory sf = yusufPrivateCaSocketFactory();
+        try (javax.net.ssl.SSLSocket socket =
+                (javax.net.ssl.SSLSocket) sf.createSocket(host, port)) {
+            socket.setSoTimeout(9000);
+            socket.startHandshake();
+            final String tlsVersion = socket.getSession().getProtocol();
+            final java.io.ByteArrayOutputStream msg = new java.io.ByteArrayOutputStream();
+            final java.io.DataOutputStream m = new java.io.DataOutputStream(msg);
+            writeMqttUtf8(m, "MQTT");
+            m.writeByte(4); // MQTT 3.1.1 protocol level
+            m.writeByte(0xC2); // clean session + username + password
+            m.writeShort(30);
+            writeMqttUtf8(m, "yusuf-v83-raw-" + UUID.randomUUID().toString().substring(0, 9));
+            writeMqttUtf8(m, Prefs.wanUser(app));
+            writeMqttUtf8(m, Prefs.wanPassword(app));
+            final byte[] body = msg.toByteArray();
+            final java.io.OutputStream out = socket.getOutputStream();
+            out.write(0x10);
+            int length = body.length;
+            do {
+                int digit = length % 128;
+                length /= 128;
+                if (length > 0) digit |= 128;
+                out.write(digit);
+            } while (length > 0);
+            out.write(body);
+            out.flush();
+            final java.io.InputStream in = socket.getInputStream();
+            int kind = in.read(), rem = in.read(), flags = in.read(), code = in.read();
+            if (kind != 0x20 || rem != 2 || flags != 0 || code < 0)
+                throw new IOException("MQTT CONNACK yaniti okunamadi");
+            return tlsVersion + ", MQTT3.1.1 CONNACK=" + code
+                    + (code == 0 ? " (PAROLA KABUL)" : " (GIRIS RET)");
+        }
+    }
+
+    private static void writeMqttUtf8(java.io.DataOutputStream out, String value)
+            throws IOException {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > 65535) throw new IOException("MQTT metni cok uzun");
+        out.writeShort(bytes.length);
+        out.write(bytes);
+    }
+
     /** Independent, real MQTT/TLS session: never sends an arrival event. */
     public static String liveTest(Context context, boolean publishProbe) throws Exception {
         if (!Prefs.wanConfigured(context))
@@ -337,7 +388,15 @@ public final class WanMqttManager {
         try {
             MqttConnectOptions opts = helper.connectionOptions(true);
             opts.setAutomaticReconnect(false);
-            testClient.connect(opts).waitForCompletion(14000);
+            try {
+                testClient.connect(opts).waitForCompletion(14000);
+            } catch (Exception pahoError) {
+                String rawResult;
+                try { rawResult = helper.rawMqttConnectProbe(); }
+                catch (Exception rawError) { rawResult = "HAM MQTT/TLS HATA: " + explainError(rawError); }
+                throw new IOException("PAHO: " + explainError(pahoError)
+                        + " | Bagimsiz TLS+MQTT: " + rawResult, pahoError);
+            }
             if (!testClient.isConnected()) throw new IOException("MQTT CONNACK başarısız");
             if (publishProbe) {
                 // ACL permits only the special probe topic. Never publish to the arrival topic.
@@ -398,9 +457,24 @@ public final class WanMqttManager {
         synchronized (connectionMonitor) { connectionMonitor.notifyAll(); }
     }
 
-    private static String safeError(Throwable err) {
+    public static String explainError(Throwable err) {
         if (err == null) return "Ayrıntı yok";
-        String s = err.getMessage();
-        return s == null || s.isEmpty() ? err.getClass().getSimpleName() : s;
+        StringBuilder s = new StringBuilder();
+        java.util.IdentityHashMap<Throwable, Boolean> seen = new java.util.IdentityHashMap<>();
+        Throwable cur = err;
+        for (int depth = 0; cur != null && depth < 5 && !seen.containsKey(cur); depth++) {
+            seen.put(cur, true);
+            if (s.length() > 0) s.append(" | neden: ");
+            s.append(cur.getClass().getSimpleName());
+            if (cur instanceof MqttException)
+                s.append(" (MQTT kod ").append(((MqttException) cur).getReasonCode()).append(")");
+            String message = cur.getMessage();
+            if (message != null && !message.trim().isEmpty())
+                s.append(": ").append(message.trim());
+            cur = cur.getCause();
+        }
+        return s.length() > 700 ? s.substring(0, 700) : s.toString();
     }
+
+    private static String safeError(Throwable err) { return explainError(err); }
 }
