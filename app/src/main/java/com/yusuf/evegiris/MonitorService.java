@@ -1093,7 +1093,7 @@ public class MonitorService extends Service {
 
     @Override public void onDestroy() {
         timeoutHandler.removeCallbacksAndMessages(null);
-        if (wanManager != null) wanManager.stop();
+        if (wanManager != null) wanManager.dispose();
         try { unregisterReceiver(receiver); } catch (Exception ignored) {}
         locationRequestSerial++;
         if (activeLocationToken != null) activeLocationToken.cancel();

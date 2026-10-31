@@ -32,7 +32,9 @@ public final class WanMqttManager {
     public interface StatusListener { void onStatus(boolean connected, String detail); }
 
     private static final int KEEPALIVE_SECONDS = 120;
-    private static final long RECONNECT_CHECK_MS = 30000L;
+    // v85-fast-retry: 30 saniyelik sabit bekleme yerine kademeli yeniden baglanma.
+    private static final long RECONNECT_CHECK_MS = 1500L;
+    private static final long[] RETRY_DELAYS_MS = {2000L, 4000L, 8000L, 16000L, 30000L};
     private static final long SAME_ALERT_THROTTLE_MS = 60000L;
     private static final String CHANNEL = "yusuf_wan_connection_v8";
     private static final int ALERT_ID = 8042;
@@ -47,6 +49,15 @@ public final class WanMqttManager {
     private volatile long networkEpoch = 0L;
     private volatile boolean stopped = true;
     private volatile long lastConnectTry = 0L;
+    private boolean connectInProgress = false;
+    private int retryStep = 0;
+    private final java.util.concurrent.ScheduledExecutorService reconnectExecutor =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "yusuf-wan-v85-retry");
+                t.setDaemon(true);
+                return t;
+            });
+    private java.util.concurrent.ScheduledFuture<?> reconnectFuture;
     private volatile int lastState = -1;
     private long lastConnectedAlert = 0L;
     private long lastDisconnectedAlert = 0L;
@@ -242,8 +253,14 @@ public final class WanMqttManager {
         activeDefaultNetwork = next;
         final long version = ++networkEpoch;
         Prefs.addEvent(app, "WAN AĞ DEĞİŞTİ", "Wi-Fi / mobil veri gecisi; yeni TLS el sikisma");
+        if (next == null) {
+            // Varsayilan ag kayboldugunda offline iken bos yere CONNECT deneme.
+            transition(false, "Ag kesildi; yeni varsayilan ag bekleniyor");
+            return;
+        }
         new Thread(() -> {
-            try { Thread.sleep(1400L); }
+            // Ag yonlendirmesinin oturmasina kisa sure tanir.
+            try { Thread.sleep(700L); }
             catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
             synchronized (WanMqttManager.this) {
                 if (stopped || source != networkCallback || version != networkEpoch) return;
@@ -270,7 +287,15 @@ public final class WanMqttManager {
             client = c;
             c.setCallback(new MqttCallbackExtended() {
                 @Override public void connectComplete(boolean reconnect, String serverURI) {
-                    if (stopped || c != client) return;
+                    synchronized (WanMqttManager.this) {
+                        if (stopped || c != client) return;
+                        connectInProgress = false;
+                        retryStep = 0;
+                        if (reconnectFuture != null) {
+                            reconnectFuture.cancel(false);
+                            reconnectFuture = null;
+                        }
+                    }
                     transition(true, reconnect ? "WAN TLS yeniden bağlandı" : "WAN TLS bağlı");
                     try {
                         c.subscribe(Prefs.topic(app) + "/ack", 1);
@@ -279,7 +304,12 @@ public final class WanMqttManager {
                     }
                 }
                 @Override public void connectionLost(Throwable cause) {
-                    if (!stopped && c == client) transition(false, "Bağlantı koptu: " + safeError(cause));
+                    synchronized (WanMqttManager.this) {
+                        if (stopped || c != client) return;
+                        connectInProgress = false;
+                        transition(false, "Bağlantı koptu: " + safeError(cause));
+                        scheduleRetry();
+                    }
                 }
                 @Override public void messageArrived(String topic, MqttMessage message) {
                     if (!topic.equals(Prefs.topic(app) + "/ack")) return;
@@ -311,22 +341,58 @@ public final class WanMqttManager {
         if (!c.isConnected()) connectIfNeeded();
     }
 
+    // Tek bekleyen retry: ayni anda iki MQTT CONNECT denenmez.
+    private synchronized void scheduleRetry() {
+        if (stopped || !Prefs.wanEnabled(app) || reconnectExecutor.isShutdown()) return;
+        if (reconnectFuture != null && !reconnectFuture.isDone()) return;
+        if (networkManager != null && networkManager.getActiveNetwork() == null) return;
+        long delay = RETRY_DELAYS_MS[Math.min(retryStep, RETRY_DELAYS_MS.length - 1)];
+        retryStep = Math.min(retryStep + 1, RETRY_DELAYS_MS.length - 1);
+        reconnectFuture = reconnectExecutor.schedule(() -> {
+            synchronized (WanMqttManager.this) {
+                reconnectFuture = null;
+                if (stopped || !Prefs.wanEnabled(app)) return;
+            }
+            ensureConnected();
+        }, delay, java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
     private synchronized void connectIfNeeded() {
         MqttAsyncClient c = client;
-        if (stopped || c == null || c.isConnected()) return;
-        long now = System.currentTimeMillis();
-        if (now - lastConnectTry < RECONNECT_CHECK_MS) return;
+        if (stopped || c == null || c.isConnected() || connectInProgress) return;
+        if (networkManager != null && networkManager.getActiveNetwork() == null) return;
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (lastConnectTry > 0 && now - lastConnectTry < RECONNECT_CHECK_MS) {
+            scheduleRetry();
+            return;
+        }
         lastConnectTry = now;
+        connectInProgress = true;
         try {
             c.connect(connectionOptions(), null, new IMqttActionListener() {
-                @Override public void onSuccess(IMqttToken token) { /* connectComplete updates state */ }
+                @Override public void onSuccess(IMqttToken token) {
+                    synchronized (WanMqttManager.this) {
+                        if (stopped || c != client) return;
+                        connectInProgress = false;
+                        retryStep = 0;
+                    }
+                    // connectComplete callback records ONLINE and re-subscribes to ACK.
+                }
                 @Override public void onFailure(IMqttToken token, Throwable exception) {
-                    if (!stopped) transition(false, "WAN TLS bağlanamadı: " + safeError(exception));
+                    synchronized (WanMqttManager.this) {
+                        if (stopped || c != client) return;
+                        connectInProgress = false;
+                        transition(false, "WAN TLS baglanamadi: " + safeError(exception));
+                        scheduleRetry();
+                    }
                 }
             });
         } catch (Exception e) {
-            // An in-progress automatic Paho reconnect can report CONNECT_IN_PROGRESS.
-            if (!stopped && !c.isConnected()) transition(false, "WAN bekleniyor: " + safeError(e));
+            connectInProgress = false;
+            if (!stopped && c == client) {
+                transition(false, "WAN yeniden deneme: " + safeError(e));
+                scheduleRetry();
+            }
         }
     }
 
@@ -440,6 +506,12 @@ public final class WanMqttManager {
     public synchronized void stop() {
         stopped = true;
         ++networkEpoch;
+        if (reconnectFuture != null) {
+            reconnectFuture.cancel(false);
+            reconnectFuture = null;
+        }
+        connectInProgress = false;
+        retryStep = 0;
         if (networkManager != null && networkCallback != null) {
             try { networkManager.unregisterNetworkCallback(networkCallback); }
             catch (Exception ignored) { }
@@ -457,6 +529,12 @@ public final class WanMqttManager {
         lastState = -1;
         Prefs.p(app).edit().putBoolean("wan_connected", false).apply();
         synchronized (connectionMonitor) { connectionMonitor.notifyAll(); }
+    }
+
+    /** MonitorService kapanirken retry executor'ini da temizle. */
+    public synchronized void dispose() {
+        stop();
+        reconnectExecutor.shutdownNow();
     }
 
     public static String explainError(Throwable err) {
