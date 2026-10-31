@@ -15,8 +15,8 @@ android {
         applicationId 'com.yusuf.evegiris.v2'
         minSdk 26
         targetSdk 35
-        versionCode 19
-        versionName '8.5'
+        versionCode 20
+        versionName '8.6'
     }
 
     signingConfigs {

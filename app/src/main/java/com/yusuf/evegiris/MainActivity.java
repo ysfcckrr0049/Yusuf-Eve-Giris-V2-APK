@@ -50,6 +50,7 @@ public class MainActivity extends Activity {
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private volatile long wanLastTestTapMs = 0L;
     private TextView homeText, mapInfo, stageText, treeText, statusText, eventLogText;
+    private TextView quickWanStatus; // YUSUF_MODERN_V86
     private LinearLayout visualFlow;
     private TextView realNetworkTestResult;
     private final java.util.concurrent.atomic.AtomicBoolean realNetworkTestRunning = new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -76,10 +77,91 @@ public class MainActivity extends Activity {
         return (int) (n * getResources().getDisplayMetrics().density + 0.5f);
     }
 
+    // YUSUF_MODERN_V86: no existing screen or function removed.
+    private GradientDrawable modernBg(int color, int stroke, int r) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(color);
+        bg.setCornerRadius(dp(r));
+        if (stroke != 0) bg.setStroke(dp(1), stroke);
+        return bg;
+    }
+
+    private LinearLayout modernSection(LinearLayout parent, String key, String name,
+                                       String explanation, boolean defaultExpanded) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(12), dp(7), dp(12), dp(12));
+        card.setBackground(modernBg(Color.WHITE, Color.rgb(220,228,239), 16));
+        LinearLayout.LayoutParams outer = new LinearLayout.LayoutParams(-1, -2);
+        outer.bottomMargin = dp(12);
+        parent.addView(card, outer);
+        final boolean[] expanded = {Prefs.p(this).getBoolean("ui_modern_"+key, defaultExpanded)};
+        TextView heading = new TextView(this);
+        heading.setTextSize(16f);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        heading.setTextColor(Color.rgb(21,48,82));
+        heading.setPadding(dp(6), dp(12), dp(6), dp(7));
+        heading.setText((expanded[0] ? "▾  " : "▸  ") + name);
+        card.addView(heading);
+        TextView info = new TextView(this);
+        info.setText(explanation);
+        info.setTextSize(12f);
+        info.setTextColor(Color.rgb(99,116,135));
+        info.setPadding(dp(6), 0, dp(6), dp(8));
+        card.addView(info);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setVisibility(expanded[0] ? View.VISIBLE : View.GONE);
+        card.addView(content);
+        heading.setOnClickListener(v -> {
+            expanded[0] = !expanded[0];
+            content.setVisibility(expanded[0] ? View.VISIBLE : View.GONE);
+            heading.setText((expanded[0] ? "▾  " : "▸  ") + name);
+            Prefs.p(this).edit().putBoolean("ui_modern_"+key, expanded[0]).apply();
+        });
+        return content;
+    }
+
+    private void confirmRealArrival() {
+        save();
+        if (!Prefs.wanEnabled(this) || !Prefs.wanConfigured(this)) {
+            toast("Once WAN ayarlarini kaydet ve WAN modunu etkinlestir");
+            return;
+        }
+        long last = Prefs.lastTrigger(this);
+        long left = last <= 0 ? 0 : Math.max(0,
+                Prefs.cooldownMs(this) - (System.currentTimeMillis()-last));
+        if (left > 0) {
+            new android.app.AlertDialog.Builder(this)
+                .setTitle("1 saat tekrar koruması")
+                .setMessage("Gerçek eve giriş son bildirimi sonrası kilit devam ediyor. "
+                    + "Kalan süre: " + fmtRemain(left) + ". Bu kilit korunur.")
+                .setPositiveButton("TAMAM", (d,w) -> {})
+                .show();
+            return;
+        }
+        new android.app.AlertDialog.Builder(this)
+            .setTitle("GERÇEK EVE GELDİM bildirimi")
+            .setMessage("Bu bir sahte test DEĞİLDİR. Home Assistant'a gerçek "
+                + "ev/telefon/yusuf/eve_geldi MQTT mesajı gönderilir; evdeki ışık "
+                + "ve otomasyonlar çalışabilir. Manuel komutta konum ve 10 dk dışarıda "
+                + "kalma aranmaz, ancak 1 saat tekrar kilidi korunur. Onaylıyor musun?")
+            .setNegativeButton("VAZGEÇ", (d,w) -> {})
+            .setPositiveButton("GERÇEK MESAJI GÖNDER", (d,w) -> {
+                Intent service = new Intent(this, MonitorService.class);
+                service.setAction(MonitorService.ACTION_MANUAL_REAL_ARRIVAL);
+                if (Build.VERSION.SDK_INT >= 26) startForegroundService(service);
+                else startService(service);
+                toast("Gerçek MQTT isteği başlatıldı; sonuç Olay Günlüğünde");
+                refreshStatus();
+            }).show();
+    }
+
     private TextView label(String s) {
         TextView v = new TextView(this);
         v.setText(s);
-        v.setTextSize(18f);
+        v.setTextSize(15f);
+        v.setTextColor(Color.rgb(28,56,91));
         v.setTypeface(Typeface.DEFAULT_BOLD);
         v.setPadding(0, dp(18), 0, dp(8));
         return v;
@@ -89,6 +171,10 @@ public class MainActivity extends Activity {
         EditText e = new EditText(this);
         e.setHint(hint);
         e.setSingleLine(true);
+        e.setTextColor(Color.rgb(25,46,76));
+        e.setTextSize(15f);
+        e.setPadding(dp(12), dp(12), dp(12), dp(12));
+        e.setBackground(modernBg(Color.rgb(250,252,255), Color.rgb(207,221,238), 10));
         return e;
     }
 
@@ -96,6 +182,11 @@ public class MainActivity extends Activity {
         Button b = new Button(this);
         b.setText(text);
         b.setAllCaps(false);
+        b.setTextSize(13f);
+        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setTextColor(Color.rgb(16,56,100));
+        b.setPadding(dp(10), dp(9), dp(10), dp(9));
+        b.setBackground(modernBg(Color.rgb(236,243,251), Color.rgb(213,226,240), 11));
         b.setOnClickListener(click);
         return b;
     }
@@ -104,12 +195,14 @@ public class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(16), dp(16), dp(16), dp(16));
+        root.setPadding(dp(14), dp(18), dp(14), dp(20));
+        root.setBackgroundColor(Color.rgb(243,247,252));
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("YUSUF EVE GİRİŞ V8.3 • MQTT KARARLI");
-        title.setTextSize(24f);
+        title.setText("YUSUF EVE GİRİŞ V8.6");
+        title.setTextSize(25f);
+        title.setTextColor(Color.rgb(17,47,85));
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setPadding(0, 0, 0, dp(8));
         root.addView(title);
@@ -117,12 +210,45 @@ public class MainActivity extends Activity {
         TextView sub = new TextView(this);
         sub.setText("Tek MQTT/TLS WAN oturumu • 120 sn keepalive\nWi-Fi, Golf6, Android Auto olay bazlı GPS • düşük pil tüketimi\nWAN bağlantısı açılır/koparsa bir kez bildirim");
         root.addView(sub);
+        sub.setTextSize(13f);
+        sub.setTextColor(Color.rgb(99,116,135));
+        sub.setPadding(0, 0, 0, dp(14));
 
-        root.addView(label("Ev Alanı Haritası"));
+        LinearLayout hero = new LinearLayout(this);
+        hero.setOrientation(LinearLayout.VERTICAL);
+        hero.setPadding(dp(14), dp(14), dp(14), dp(14));
+        hero.setBackground(modernBg(Color.rgb(231,239,251), Color.rgb(196,213,238), 16));
+        LinearLayout.LayoutParams heroLp = new LinearLayout.LayoutParams(-1,-2);
+        heroLp.bottomMargin = dp(14);
+        root.addView(hero,heroLp);
+        TextView mainHeading = new TextView(this);
+        mainHeading.setText("KONTROL MERKEZİ  •  Gerçek bildirim");
+        mainHeading.setTypeface(Typeface.DEFAULT_BOLD);
+        mainHeading.setTextColor(Color.rgb(22,57,102));
+        mainHeading.setTextSize(17f);
+        hero.addView(mainHeading);
+        quickWanStatus = new TextView(this);
+        quickWanStatus.setTextSize(13f);
+        quickWanStatus.setPadding(0, dp(8), 0, dp(10));
+        hero.addView(quickWanStatus);
+        Button realArrival = button("EVET, GERÇEKTEN EVE GELDİM  •  BİLDİR", v -> confirmRealArrival());
+        realArrival.setTextColor(Color.WHITE);
+        realArrival.setTextSize(15f);
+        realArrival.setBackground(modernBg(Color.rgb(174,57,43), 0, 12));
+        hero.addView(realArrival, new LinearLayout.LayoutParams(-1,dp(58)));
+        TextView manualInfo = new TextView(this);
+        manualInfo.setText("Gerçek MQTT bildirimi • Onay sorar • 1 saat tekrar koruması aktif");
+        manualInfo.setTextSize(12f);
+        manualInfo.setTextColor(Color.rgb(84,100,121));
+        manualInfo.setPadding(0,dp(9),0,0);
+        hero.addView(manualInfo);
+
+        LinearLayout mapPanel = modernSection(root, "map", "02  •  EV HARİTASI", "Ev noktası, konum seçimi ve harita kontrolleri", false);
+        mapPanel.addView(label("Ev Alanı Haritası"));
         mapInfo = new TextView(this);
         mapInfo.setText("Haritada uzun bas: yeni ev noktası seçilir. Mavi daire ev alanını gösterir.");
         mapInfo.setPadding(0, 0, 0, dp(8));
-        root.addView(mapInfo);
+        mapPanel.addView(mapInfo);
 
         map = new MapView(this);
         map.setMultiTouchControls(true);
@@ -130,7 +256,7 @@ public class MainActivity extends Activity {
         map.getController().setZoom(18.0);
         LinearLayout.LayoutParams mapLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(360));
-        root.addView(map, mapLp);
+        mapPanel.addView(map, mapLp);
 
         MapEventsOverlay events = new MapEventsOverlay(new MapEventsReceiver() {
             @Override public boolean singleTapConfirmedHelper(GeoPoint p) { return false; }
@@ -143,27 +269,28 @@ public class MainActivity extends Activity {
         });
         map.getOverlays().add(events);
 
-        root.addView(button("HARİTADAKİ PİNİ EV YAP", v -> saveSelectedAsHome()));
-        root.addView(button("ŞU ANKİ KONUMU EV YAP", v -> setCurrentAsHome()));
-        root.addView(button("HARİTAYI EV KONUMUNA ORTALA", v -> centerHome()));
+        mapPanel.addView(button("HARİTADAKİ PİNİ EV YAP", v -> saveSelectedAsHome()));
+        mapPanel.addView(button("ŞU ANKİ KONUMU EV YAP", v -> setCurrentAsHome()));
+        mapPanel.addView(button("HARİTAYI EV KONUMUNA ORTALA", v -> centerHome()));
 
-        root.addView(label("YENİ V8 — TEK WAN MQTT / TLS"));
+        LinearLayout wanPanel = modernSection(root, "wan", "01  •  WAN BAĞLANTISI", "Gerçek MQTT testleri, TLS ayarları ve bağlantı yönetimi", true);
+        wanPanel.addView(label("YENİ V8 — TEK WAN MQTT / TLS"));
         TextView wanHelp = new TextView(this);
         wanHelp.setText("Tek statik WAN IP: 95.70.192.182:8883.\nÖzel CA sertifikasıyla TLS doğrulanır. 120 sn keepalive.\nWAN açılana kadar eski ayarlar korunur.");
-        root.addView(wanHelp);
-        wanHost = edit("95.70.192.182"); root.addView(wanHost);
-        wanPort = edit("8883"); wanPort.setInputType(InputType.TYPE_CLASS_NUMBER); root.addView(wanPort);
-        wanUser = edit("yusuf_telefon_v81"); root.addView(wanUser);
+        wanPanel.addView(wanHelp);
+        wanHost = edit("95.70.192.182"); wanPanel.addView(wanHost);
+        wanPort = edit("8883"); wanPort.setInputType(InputType.TYPE_CLASS_NUMBER); wanPanel.addView(wanPort);
+        wanUser = edit("yusuf_telefon_v81"); wanPanel.addView(wanUser);
         wanPass = edit("WAN MQTT şifresi");
         wanPass.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        root.addView(wanPass);
-        root.addView(button("GERÇEK TEST 1 — TLS + MQTT BAĞLAN", v -> runWanLiveTest(false)));
-        root.addView(button("GERÇEK TEST 2 — QOS 1 MESAJ GÖNDER (ZARARSIZ)", v -> runWanLiveTest(true)));
+        wanPanel.addView(wanPass);
+        wanPanel.addView(button("GERÇEK TEST 1 — TLS + MQTT BAĞLAN", v -> runWanLiveTest(false)));
+        wanPanel.addView(button("GERÇEK TEST 2 — QOS 1 MESAJ GÖNDER (ZARARSIZ)", v -> runWanLiveTest(true)));
         wanLiveTestResult = new TextView(this);
         wanLiveTestResult.setText("Testler gerçek MQTT/TLS oturumu kullanır. Eve giriş tetiklenmez.");
         wanLiveTestResult.setPadding(0, dp(8), 0, dp(12));
-        root.addView(wanLiveTestResult);
-        root.addView(button("WAN AYARLARINI KAYDET VE BAĞLAN", v -> {
+        wanPanel.addView(wanLiveTestResult);
+        wanPanel.addView(button("WAN AYARLARINI KAYDET VE BAĞLAN", v -> {
             save();
             if (!Prefs.wanConfigured(this)) {
                 toast("WAN için 95.70.192.182:8883 ve MQTT kullanıcısı/şifresi gerekli");
@@ -176,7 +303,7 @@ public class MainActivity extends Activity {
             toast("WAN TLS bağlanıyor. LAN/VPN/HTTPS yedeği devre dışı.");
             refreshStatus();
         }));
-        root.addView(button("WAN OTURUMUNU KAPAT / ESKİ SİSTEME DÖN", v -> {
+        wanPanel.addView(button("WAN OTURUMUNU KAPAT / ESKİ SİSTEME DÖN", v -> {
             Prefs.p(this).edit().putBoolean("wan_enabled", false).apply();
             Intent service = new Intent(this, MonitorService.class);
             service.setAction(MonitorService.ACTION_WAN_RESTART);
@@ -184,24 +311,28 @@ public class MainActivity extends Activity {
             toast("WAN kapatıldı; V7.4.2 ayarları duruyor");
             refreshStatus();
         }));
-        root.addView(label("MQTT OLAY KONUSU"));
+        View mapCard = (View) mapPanel.getParent();
+        root.removeView(mapCard);
+        root.addView(mapCard);
+        LinearLayout settingsPanel = modernSection(root, "settings", "04  •  AYARLAR", "MQTT konusu, Wi-Fi, Bluetooth, konum ve izinler", false);
+        settingsPanel.addView(label("MQTT OLAY KONUSU"));
         // Legacy MQTT transport settings kept only for rollback.
         host = edit("192.168.7.129"); /* V8 hidden old transport */
         port = edit("1883"); port.setInputType(InputType.TYPE_CLASS_NUMBER); /* V8 hidden old transport */
         user = edit("MQTT kullanıcı adı"); /* V8 hidden old transport */
         pass = edit("MQTT parola"); pass.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD); /* V8 hidden old transport */
-        topic = edit("ev/telefon/yusuf/eve_geldi"); root.addView(topic);
+        topic = edit("ev/telefon/yusuf/eve_geldi"); settingsPanel.addView(topic);
 
-        root.addView(label("Ev Wi‑Fi"));
-        ssid = edit("Yusuf CAKIR Asus"); root.addView(ssid);
+        settingsPanel.addView(label("Ev Wi‑Fi"));
+        ssid = edit("Yusuf CAKIR Asus"); settingsPanel.addView(ssid);
 
-        root.addView(label("Araç Bluetooth"));
-        carBtName = edit("Ysf Golf6"); root.addView(carBtName);
+        settingsPanel.addView(label("Araç Bluetooth"));
+        carBtName = edit("Ysf Golf6"); settingsPanel.addView(carBtName);
 
-        root.addView(label("Ev yarıçapı (metre)"));
+        settingsPanel.addView(label("Ev yarıçapı (metre)"));
         radius = edit("150");
         radius.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
-        root.addView(radius);
+        settingsPanel.addView(radius);
         radius.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) { updateMapOverlays(false); }
@@ -210,20 +341,21 @@ public class MainActivity extends Activity {
 
         homeText = new TextView(this);
         homeText.setPadding(0, dp(16), 0, dp(8));
-        root.addView(homeText);
+        settingsPanel.addView(homeText);
 
-        root.addView(button("AYARLARI KAYDET", v -> {
+        settingsPanel.addView(button("AYARLARI KAYDET", v -> {
             save();
             updateMapOverlays(false);
             toast("Ayarlar kaydedildi");
             refreshStatus();
         }));
-        root.addView(button("ZAMAN AŞIMI / GÜVENLİK AYARLARI", v -> startActivity(new Intent(this, TimingSettingsActivity.class))));
-        root.addView(button("ARKA PLAN KONUM İZNİ AYARLARI", v -> openAppSettings()));
-        root.addView(button("İZLEMEYİ BAŞLAT", v -> startMonitor()));
-        root.addView(button("KONUMU ŞİMDİ TAZELE (YÜKSEK DOĞRULUK)", v -> sendServiceAction(MonitorService.ACTION_FORCE_LOCATION)));
-        root.addView(button("İZLEMEYİ DURDUR", v -> stopMonitor()));
-        root.addView(button("ORTAK TETİK KİLİDİNİ SIFIRLA", v -> {
+        settingsPanel.addView(button("ZAMAN AŞIMI / GÜVENLİK AYARLARI", v -> startActivity(new Intent(this, TimingSettingsActivity.class))));
+        settingsPanel.addView(button("ARKA PLAN KONUM İZNİ AYARLARI", v -> openAppSettings()));
+        LinearLayout controlPanel = modernSection(root, "control", "03  •  İZLEME & KONTROLLER", "İzleme başlatma, durdurma ve kilit kontrolleri", true);
+        controlPanel.addView(button("İZLEMEYİ BAŞLAT", v -> startMonitor()));
+        controlPanel.addView(button("KONUMU ŞİMDİ TAZELE (YÜKSEK DOĞRULUK)", v -> sendServiceAction(MonitorService.ACTION_FORCE_LOCATION)));
+        controlPanel.addView(button("İZLEMEYİ DURDUR", v -> stopMonitor()));
+        controlPanel.addView(button("ORTAK TETİK KİLİDİNİ SIFIRLA", v -> {
             Prefs.p(this).edit().putLong("last_trigger_ms", 0L).apply();
             Prefs.status(this, "Ortak tetik kilidi manuel sifirlandi");
             Prefs.addEvent(this, "Kilit sıfırlandı", "Ortak tetik kilidi manuel sıfırlandı.");
@@ -233,7 +365,7 @@ public class MainActivity extends Activity {
             refreshStatus();
         }));
 
-        root.addView(button("TEST: 30 DK WI-FI AÇMA KİLİDİNİ KALDIR", v -> {
+        controlPanel.addView(button("TEST: 30 DK WI-FI AÇMA KİLİDİNİ KALDIR", v -> {
             Prefs.p(this).edit()
                     .remove("home_wifi_enable_lock_until_ms")
                     .putLong("home_wifi_enable_lock_manual_reset_ms", System.currentTimeMillis())
@@ -244,61 +376,66 @@ public class MainActivity extends Activity {
             refreshStatus();
         }));
 
-        root.addView(label("Sahte Test Butonları (kuru çalışma)"));
+        LinearLayout dryPanel = modernSection(root, "dry", "05  •  SAHTE TESTLER", "Mevcut simülasyonlar; hiçbir gerçek MQTT mesajı göndermez", false);
+        dryPanel.addView(label("Sahte Test Butonları (kuru çalışma)"));
         TextView fakeInfo = new TextView(this);
         fakeInfo.setText("Bu butonlar GERÇEK MQTT göndermez. Sadece algoritmanın hangi aşamada ne yapacağını görselleştirir.");
-        root.addView(fakeInfo);
-        root.addView(button("TEST: Evden ayrıldı", v -> sendServiceAction(MonitorService.ACTION_TEST_HOME_LEAVE)));
-        root.addView(button("TEST: Wi‑Fi ayrıldı / 10 dk sayaç başladı", v -> sendServiceAction(MonitorService.ACTION_TEST_WIFI_AWAY)));
-        root.addView(button("TEST: Golf6 bağlandı", v -> sendServiceAction(MonitorService.ACTION_TEST_BT_CONNECTED)));
-        root.addView(button("TEST: Golf6 bağlantısı kesildi", v -> sendServiceAction(MonitorService.ACTION_TEST_BT)));
-        root.addView(button("TEST: Eve giriş oldu", v -> sendServiceAction(MonitorService.ACTION_TEST_HOME_ENTER)));
-        root.addView(button("TEST: Wi‑Fi 10 dk tamam + geri bağlandı", v -> sendServiceAction(MonitorService.ACTION_TEST_WIFI_READY)));
-        root.addView(button("TEST: Android Auto kapandı", v -> sendServiceAction(MonitorService.ACTION_TEST_AA)));
-        root.addView(button("TEST: Eve şarjda geldi", v -> sendServiceAction(MonitorService.ACTION_TEST_CHARGE_ARRIVAL)));
-        root.addView(button("TEST: Şarjdan çıktı", v -> sendServiceAction(MonitorService.ACTION_TEST_CHARGE)));
-        root.addView(button("TEST: TAM AKIŞ / MQTT YOK", v -> sendServiceAction(MonitorService.ACTION_TEST_FULL)));
-        root.addView(button("TEST: ŞARJ ZAMAN AŞIMI / MQTT YOK", v -> sendServiceAction(MonitorService.ACTION_TEST_CHARGE_TIMEOUT)));
-        root.addView(button("TEST: GENEL ADAY ZAMAN AŞIMI / MQTT YOK", v -> sendServiceAction(MonitorService.ACTION_TEST_CANDIDATE_TIMEOUT)));
+        dryPanel.addView(fakeInfo);
+        dryPanel.addView(button("TEST: Evden ayrıldı", v -> sendServiceAction(MonitorService.ACTION_TEST_HOME_LEAVE)));
+        dryPanel.addView(button("TEST: Wi‑Fi ayrıldı / 10 dk sayaç başladı", v -> sendServiceAction(MonitorService.ACTION_TEST_WIFI_AWAY)));
+        dryPanel.addView(button("TEST: Golf6 bağlandı", v -> sendServiceAction(MonitorService.ACTION_TEST_BT_CONNECTED)));
+        dryPanel.addView(button("TEST: Golf6 bağlantısı kesildi", v -> sendServiceAction(MonitorService.ACTION_TEST_BT)));
+        dryPanel.addView(button("TEST: Eve giriş oldu", v -> sendServiceAction(MonitorService.ACTION_TEST_HOME_ENTER)));
+        dryPanel.addView(button("TEST: Wi‑Fi 10 dk tamam + geri bağlandı", v -> sendServiceAction(MonitorService.ACTION_TEST_WIFI_READY)));
+        dryPanel.addView(button("TEST: Android Auto kapandı", v -> sendServiceAction(MonitorService.ACTION_TEST_AA)));
+        dryPanel.addView(button("TEST: Eve şarjda geldi", v -> sendServiceAction(MonitorService.ACTION_TEST_CHARGE_ARRIVAL)));
+        dryPanel.addView(button("TEST: Şarjdan çıktı", v -> sendServiceAction(MonitorService.ACTION_TEST_CHARGE)));
+        dryPanel.addView(button("TEST: TAM AKIŞ / MQTT YOK", v -> sendServiceAction(MonitorService.ACTION_TEST_FULL)));
+        dryPanel.addView(button("TEST: ŞARJ ZAMAN AŞIMI / MQTT YOK", v -> sendServiceAction(MonitorService.ACTION_TEST_CHARGE_TIMEOUT)));
+        dryPanel.addView(button("TEST: GENEL ADAY ZAMAN AŞIMI / MQTT YOK", v -> sendServiceAction(MonitorService.ACTION_TEST_CANDIDATE_TIMEOUT)));
 
-        root.addView(label("Şu an ne yapıyor?"));
+        LinearLayout livePanel = modernSection(root, "live", "06  •  CANLI AKIŞ", "Şu anki karar ve algoritma görünümü", true);
+        livePanel.addView(label("Şu an ne yapıyor?"));
         stageText = new TextView(this);
         stageText.setTypeface(Typeface.MONOSPACE);
         stageText.setTextSize(14f);
-        root.addView(stageText);
+        livePanel.addView(stageText);
 
-        root.addView(label("Canlı Algoritma Görseli"));
+        livePanel.addView(label("Canlı Algoritma Görseli"));
         TextView visualHint = new TextView(this);
         visualHint.setText("YEŞİL=tamam • SARI=şu an beklenen aşama • KIRMIZI=engelleyici şart • GRİ=henüz gelinmedi");
         visualHint.setPadding(0, 0, 0, dp(8));
-        root.addView(visualHint);
+        livePanel.addView(visualHint);
         visualFlow = new LinearLayout(this);
         visualFlow.setOrientation(LinearLayout.VERTICAL);
-        root.addView(visualFlow);
+        livePanel.addView(visualFlow);
 
-        root.addView(label("Algoritma Ağacı"));
+        LinearLayout treePanel = modernSection(root, "tree", "07  •  KARAR AĞACI", "Tüm ayrıntılı algoritma adımları", false);
+        treePanel.addView(label("Algoritma Ağacı"));
         treeText = new TextView(this);
         treeText.setTypeface(Typeface.MONOSPACE);
         treeText.setTextSize(13f);
-        root.addView(treeText);
+        treePanel.addView(treeText);
 
-        root.addView(label("Olay Günlüğü (son 40 olay)"));
+        LinearLayout logPanel = modernSection(root, "log", "08  •  OLAY GÜNLÜĞÜ", "Son 40 olay ve temizleme düğmesi", false);
+        logPanel.addView(label("Olay Günlüğü (son 40 olay)"));
         eventLogText = new TextView(this);
         eventLogText.setTypeface(Typeface.MONOSPACE);
         eventLogText.setTextSize(12f);
         eventLogText.setPadding(dp(8), dp(8), dp(8), dp(8));
-        root.addView(eventLogText);
-        root.addView(button("OLAY GÜNLÜĞÜNÜ TEMİZLE", v -> {
+        logPanel.addView(eventLogText);
+        logPanel.addView(button("OLAY GÜNLÜĞÜNÜ TEMİZLE", v -> {
             Prefs.clearEventLog(this);
             Prefs.addEvent(this, "Günlük temizlendi", "Kullanıcı olay günlüğünü temizledi.");
             refreshStatus();
         }));
 
-        root.addView(label("Canlı Durum / Ham Veri"));
+        LinearLayout rawPanel = modernSection(root, "raw", "09  •  HAM VERİLER", "Tüm sensör, konum ve MQTT durum alanları", false);
+        rawPanel.addView(label("Canlı Durum / Ham Veri"));
         statusText = new TextView(this);
         statusText.setTextSize(14f);
         statusText.setPadding(0, 0, 0, dp(40));
-        root.addView(statusText);
+        rawPanel.addView(statusText);
 
         setContentView(scroll);
     }
@@ -1004,6 +1141,18 @@ public class MainActivity extends Activity {
     private void refreshStatus() {
         if (statusText == null) return;
         SharedPreferences p = Prefs.p(this);
+        if (quickWanStatus != null) {
+            boolean enabled = Prefs.wanEnabled(this);
+            boolean connected = p.getBoolean("wan_connected", false);
+            long last = Prefs.lastTrigger(this);
+            long remain = last <= 0 ? 0 : Math.max(0, Prefs.cooldownMs(this) -
+                    (System.currentTimeMillis() - last));
+            quickWanStatus.setText("WAN: " + (!enabled ? "KAPALI" : connected ? "BAĞLI ✓" : "YENİDEN BAĞLANIYOR")
+                    + "   •   İzleme: " + (Prefs.serviceEnabled(this) ? "AÇIK" : "KAPALI")
+                    + "\nGerçek bildirim kilidi: " + (remain > 0 ? fmtRemain(remain) : "HAZIR")
+                    + "\nSon HA ACK: " + (p.getString("wan_last_ha_ack", "").isEmpty() ? "Henüz yok" : "Alındı"));
+            quickWanStatus.setTextColor(Color.rgb(24, 72, 118));
+        }
         renderVisualFlow(p);
         if (eventLogText != null) eventLogText.setText(Prefs.eventLog(this));
         long last = Prefs.lastTrigger(this);

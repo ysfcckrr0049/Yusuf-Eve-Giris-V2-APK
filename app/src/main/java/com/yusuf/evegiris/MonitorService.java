@@ -38,6 +38,7 @@ import com.google.android.gms.tasks.CancellationTokenSource;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MonitorService extends Service {
+    public static final String ACTION_MANUAL_REAL_ARRIVAL = "com.yusuf.evegiris.MANUAL_REAL_ARRIVAL";
     public static final String ACTION_TEST_WIFI = "com.yusuf.evegiris.TEST_WIFI";
     public static final String ACTION_TEST_BT = "com.yusuf.evegiris.TEST_BT";
     public static final String ACTION_TEST_AA = "com.yusuf.evegiris.TEST_AA";
@@ -1064,6 +1065,57 @@ public class MonitorService extends Service {
         }
     }
 
+    // Explicit user-triggered REAL event, not a dry-run. Never falls back to LAN/HTTPS.
+    // Manual mode intentionally bypasses location/Wi-Fi candidate conditions,
+    // while preserving the one-hour successful-trigger cooldown.
+    private void sendConfirmedManualArrival() {
+        final long now = System.currentTimeMillis();
+        if (!Prefs.wanEnabled(this) || !Prefs.wanConfigured(this)) {
+            setFlow("MANUEL GERÇEK RED", "WAN baglantisi etkin veya yapilandirilmis degil.");
+            Prefs.addEvent(this, "MANUEL GERÇEK RED", "WAN kapali; mesaj gonderilmedi");
+            return;
+        }
+        final long last = Prefs.lastTrigger(this);
+        if (last > 0L && now - last < Prefs.cooldownMs(this)) {
+            long wait = (Prefs.cooldownMs(this) - (now - last) + 999L) / 1000L;
+            setFlow("MANUEL GERÇEK KİLİT", "Bir saatlik koruma aktif, kalan " + wait + " saniye");
+            Prefs.addEvent(this, "MANUEL GERÇEK RED", "Bir saatlik tekrar kilidi aktif");
+            return;
+        }
+        if (!sending.compareAndSet(false, true)) {
+            setFlow("MANUEL GERÇEK RED", "Baska bir eve giris MQTT gonderimi suruyor");
+            return;
+        }
+        Prefs.p(this).edit().putBoolean("mqtt_sending", true).apply();
+        setFlow("MANUEL GERÇEK MQTT", "Onayli kullanici istegi, gercek eve-gelis mesaji gonderiliyor");
+        new Thread(() -> {
+            String eventId = java.util.UUID.randomUUID().toString();
+            long ts = System.currentTimeMillis();
+            String payload = "{\"event\":\"YUSUF_EVE_GELDI\",\"method\":\"manuel_gercek_buton\",\"ts\":"
+                    + ts + ",\"source\":\"YusufEveGirisAPK\",\"event_id\":\""
+                    + eventId + "\"}";
+            try {
+                if (wanManager == null) throw new java.io.IOException("WAN servis baglantisi yok");
+                wanManager.publish(payload);
+                long accepted = System.currentTimeMillis();
+                Prefs.p(this).edit()
+                    .putLong("last_trigger_ms", accepted)
+                    .putString("last_trigger_method", "manuel_gercek_buton")
+                    .putString("manual_last_event_id", eventId)
+                    .putLong("manual_last_sent_ms", accepted).apply();
+                setFlow("MANUEL GERÇEK PUBACK", "Gercek MQTT broker QoS1 onayi alindi; "
+                        + "Home Assistant islemi ayri ACK ile dogrulanir. event_id=" + eventId);
+                Prefs.addEvent(this, "GERÇEK EVE GELDİM", "Broker PUBACK: " + eventId);
+            } catch (Exception e) {
+                setFlow("MANUEL GERÇEK HATA", "Mesaj gonderilemedi: " + WanMqttManager.explainError(e));
+                Prefs.addEvent(this, "GERÇEK EVE GELDİM HATA", WanMqttManager.explainError(e));
+            } finally {
+                sending.set(false);
+                Prefs.p(this).edit().putBoolean("mqtt_sending", false).apply();
+            }
+        }, "yusuf-v86-manual-real-arrival").start();
+    }
+
     private String escape(String s) {
         return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
@@ -1074,6 +1126,10 @@ public class MonitorService extends Service {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
+        if (ACTION_MANUAL_REAL_ARRIVAL.equals(action)) {
+            sendConfirmedManualArrival();
+            return START_STICKY;
+        }
         if (ACTION_WAN_RESTART.equals(action)) {
             if (wanManager == null) wanManager = new WanMqttManager(this,
                     (online, detail) -> updateNotification(online ? "WAN MQTT bağlı" : "WAN MQTT kesildi"));
