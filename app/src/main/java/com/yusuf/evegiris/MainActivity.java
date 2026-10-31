@@ -51,6 +51,7 @@ public class MainActivity extends Activity {
     private volatile long wanLastTestTapMs = 0L;
     private TextView homeText, mapInfo, stageText, treeText, statusText, eventLogText;
     private TextView quickWanStatus; // YUSUF_MODERN_V86
+    private TextView manualSendResult; // YUSUF_REAL_V87
     private LinearLayout visualFlow;
     private TextView realNetworkTestResult;
     private final java.util.concurrent.atomic.AtomicBoolean realNetworkTestRunning = new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -122,39 +123,60 @@ public class MainActivity extends Activity {
         return content;
     }
 
+    // YUSUF_REAL_V87: Manuel istek, MQTT broker onayi ve HA onayi birbirinden ayrilir.
+    private void startConfirmedRealArrival(boolean overrideCooldown) {
+        Prefs.p(this).edit().putString("manual_send_status",
+                "İstek servise iletildi; gerçek MQTT broker onayı bekleniyor").apply();
+        Prefs.addEvent(this, "MANUEL GERÇEK İSTEK",
+                overrideCooldown ? "Kilit için iki aşamalı kullanıcı onayı verildi" : "Gerçek kullanıcı onayı verildi");
+        Intent service = new Intent(this, MonitorService.class);
+        service.setAction(MonitorService.ACTION_MANUAL_REAL_ARRIVAL);
+        service.putExtra("manual_override_cooldown", overrideCooldown);
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(service);
+        else startService(service);
+        toast("Gerçek eve-giriş isteği gönderim için sıraya alındı; sonuç yukarıda görünecek");
+        refreshStatus();
+    }
+
     private void confirmRealArrival() {
         save();
         if (!Prefs.wanEnabled(this) || !Prefs.wanConfigured(this)) {
-            toast("Once WAN ayarlarini kaydet ve WAN modunu etkinlestir");
+            toast("WAN ayarlarını etkinleştir; gerçek mesaj gönderilmedi");
             return;
         }
         long last = Prefs.lastTrigger(this);
-        long left = last <= 0 ? 0 : Math.max(0,
+        long left = last <= 0L ? 0L : Math.max(0L,
                 Prefs.cooldownMs(this) - (System.currentTimeMillis()-last));
-        if (left > 0) {
+        if (left > 0L) {
             new android.app.AlertDialog.Builder(this)
-                .setTitle("1 saat tekrar koruması")
-                .setMessage("Gerçek eve giriş son bildirimi sonrası kilit devam ediyor. "
-                    + "Kalan süre: " + fmtRemain(left) + ". Bu kilit korunur.")
-                .setPositiveButton("TAMAM", (d,w) -> {})
+                .setTitle("TEKRAR KORUMASI AKTİF — MESAJ HENÜZ GÖNDERİLMEDİ")
+                .setMessage("Son eve gelişten kalan kilit: " + fmtRemain(left)
+                     + ". NORMAL OTOMATİK KORUMA devam edecek. Sadece bu manuel bildirimi"
+                     + " tekrar göndermek istiyorsan ayrıca onay vermen gerekir."
+                     + " Işıklar ve Home Assistant otomasyonları yeniden çalışabilir.")
+                .setNegativeButton("VAZGEÇ / GÖNDERME", (d,w) -> {})
+                .setPositiveButton("BİLİNÇLİ TEKRAR GÖNDER", (d,w) ->
+                     new android.app.AlertDialog.Builder(this)
+                         .setTitle("SON ONAY — GERÇEK MQTT")
+                         .setMessage("1 saat kilidini YALNIZCA bu manuel işlem için aşarak gerçek"
+                             + " YUSUF_EVE_GELDI MQTT olayı yayımlayacaksın. Bu bir test değil;"
+                             + " otomasyonlar yeniden tetiklenebilir. Emin misin?")
+                         .setNegativeButton("HAYIR", (d2,w2) -> {})
+                         .setPositiveButton("EVET, GERÇEK MESAJI GÖNDER",
+                             (d2,w2) -> startConfirmedRealArrival(true))
+                         .show())
                 .show();
             return;
         }
         new android.app.AlertDialog.Builder(this)
-            .setTitle("GERÇEK EVE GELDİM bildirimi")
-            .setMessage("Bu bir sahte test DEĞİLDİR. Home Assistant'a gerçek "
-                + "ev/telefon/yusuf/eve_geldi MQTT mesajı gönderilir; evdeki ışık "
-                + "ve otomasyonlar çalışabilir. Manuel komutta konum ve 10 dk dışarıda "
-                + "kalma aranmaz, ancak 1 saat tekrar kilidi korunur. Onaylıyor musun?")
-            .setNegativeButton("VAZGEÇ", (d,w) -> {})
-            .setPositiveButton("GERÇEK MESAJI GÖNDER", (d,w) -> {
-                Intent service = new Intent(this, MonitorService.class);
-                service.setAction(MonitorService.ACTION_MANUAL_REAL_ARRIVAL);
-                if (Build.VERSION.SDK_INT >= 26) startForegroundService(service);
-                else startService(service);
-                toast("Gerçek MQTT isteği başlatıldı; sonuç Olay Günlüğünde");
-                refreshStatus();
-            }).show();
+            .setTitle("GERÇEK EVE GELDİM — MQTT GÖNDERİMİ")
+            .setMessage("Bu gerçek bir bildirimdir: ev/telefon/yusuf/eve_geldi konusuna"
+                + " MQTT QoS1 mesajı gider. Işıklar ve HA otomasyonları çalışabilir."
+                + " Manuel kullanımda konum ve 10 dakika dışarıda kalma koşulu aranmaz."
+                + " Gönderimden sonra 1 saat tekrar koruması işler.")
+            .setNegativeButton("VAZGEÇ / GÖNDERME", (d,w) -> {})
+            .setPositiveButton("GERÇEK MESAJI GÖNDER", (d,w) -> startConfirmedRealArrival(false))
+            .show();
     }
 
     private TextView label(String s) {
@@ -242,6 +264,12 @@ public class MainActivity extends Activity {
         manualInfo.setTextColor(Color.rgb(84,100,121));
         manualInfo.setPadding(0,dp(9),0,0);
         hero.addView(manualInfo);
+        manualSendResult = new TextView(this);
+        manualSendResult.setTextSize(13f);
+        manualSendResult.setTypeface(Typeface.DEFAULT_BOLD);
+        manualSendResult.setTextColor(Color.rgb(19,56,88));
+        manualSendResult.setPadding(0, dp(10), 0, dp(3));
+        hero.addView(manualSendResult);
 
         LinearLayout mapPanel = modernSection(root, "map", "02  •  EV HARİTASI", "Ev noktası, konum seçimi ve harita kontrolleri", false);
         mapPanel.addView(label("Ev Alanı Haritası"));
@@ -1152,6 +1180,15 @@ public class MainActivity extends Activity {
                     + "\nGerçek bildirim kilidi: " + (remain > 0 ? fmtRemain(remain) : "HAZIR")
                     + "\nSon HA ACK: " + (p.getString("wan_last_ha_ack", "").isEmpty() ? "Henüz yok" : "Alındı"));
             quickWanStatus.setTextColor(Color.rgb(24, 72, 118));
+        }
+        if (manualSendResult != null) {
+            String manualStatus = p.getString("manual_send_status", "Henüz gerçek manuel mesaj gönderilmedi");
+            String manualEventId = p.getString("manual_last_event_id", "");
+            String haAck = p.getString("wan_last_ha_ack", "");
+            boolean confirmed = !manualEventId.isEmpty() && manualEventId.equals(haAck);
+            manualSendResult.setText("GERÇEK BİLDİRİM: " + manualStatus
+                    + (confirmed ? "\nHome Assistant ACK: ALINDI" : "\nHome Assistant ACK: henüz doğrulanmadı"));
+            manualSendResult.setTextColor(confirmed ? Color.rgb(15,112,70) : Color.rgb(19,56,88));
         }
         renderVisualFlow(p);
         if (eventLogText != null) eventLogText.setText(Prefs.eventLog(this));

@@ -320,6 +320,10 @@ public final class WanMqttManager {
                         if (!id.isEmpty()) {
                             Prefs.p(app).edit().putString("wan_last_ha_ack", id)
                                     .putLong("wan_last_ha_ack_ms", System.currentTimeMillis()).apply();
+                            if (id.equals(Prefs.p(app).getString("manual_last_event_id", ""))) {
+                                Prefs.p(app).edit().putString("manual_send_status",
+                                        "HOME ASSISTANT ACK ALINDI").apply();
+                            }
                             Prefs.addEvent(app, "HA ACK ALINDI", "event_id=" + id);
                         }
                     } catch (Exception ignored) {

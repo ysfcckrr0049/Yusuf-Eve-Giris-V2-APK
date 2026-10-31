@@ -1068,24 +1068,43 @@ public class MonitorService extends Service {
     // Explicit user-triggered REAL event, not a dry-run. Never falls back to LAN/HTTPS.
     // Manual mode intentionally bypasses location/Wi-Fi candidate conditions,
     // while preserving the one-hour successful-trigger cooldown.
-    private void sendConfirmedManualArrival() {
+    private void sendConfirmedManualArrival(boolean manualOverride) {
         final long now = System.currentTimeMillis();
         if (!Prefs.wanEnabled(this) || !Prefs.wanConfigured(this)) {
             setFlow("MANUEL GERÇEK RED", "WAN baglantisi etkin veya yapilandirilmis degil.");
             Prefs.addEvent(this, "MANUEL GERÇEK RED", "WAN kapali; mesaj gonderilmedi");
+            Prefs.p(this).edit().putString("manual_send_status",
+                    "GÖNDERİLMEDİ: WAN kapalı").apply();
             return;
         }
         final long last = Prefs.lastTrigger(this);
-        if (last > 0L && now - last < Prefs.cooldownMs(this)) {
+        if (!manualOverride && last > 0L && now - last < Prefs.cooldownMs(this)) {
             long wait = (Prefs.cooldownMs(this) - (now - last) + 999L) / 1000L;
             setFlow("MANUEL GERÇEK KİLİT", "Bir saatlik koruma aktif, kalan " + wait + " saniye");
             Prefs.addEvent(this, "MANUEL GERÇEK RED", "Bir saatlik tekrar kilidi aktif");
+            Prefs.p(this).edit().putString("manual_send_status",
+                    "GÖNDERİLMEDİ: 1 saatlik koruma aktif").apply();
+            return;
+        }
+        // Bilincli manuel tekrar izni bile 30 saniyede ikinci istege izin vermez.
+        long lastManualAttempt = Prefs.p(this).getLong("manual_request_at_ms", 0L);
+        if (lastManualAttempt > 0 && now-lastManualAttempt < 30_000L) {
+            setFlow("MANUEL GERÇEK RED", "30 saniyelik çift dokunma koruması aktif");
+            Prefs.p(this).edit().putString("manual_send_status",
+                    "GÖNDERİLMEDİ: 30 saniyelik çift dokunma koruması").apply();
+            Prefs.addEvent(this, "MANUEL GERÇEK RED", "30 saniyelik çift dokunma koruması");
             return;
         }
         if (!sending.compareAndSet(false, true)) {
             setFlow("MANUEL GERÇEK RED", "Baska bir eve giris MQTT gonderimi suruyor");
+            Prefs.p(this).edit().putString("manual_send_status",
+                    "GÖNDERİLMEDİ: başka bir gerçek gönderim sürüyor").apply();
+            Prefs.addEvent(this, "MANUEL GERÇEK RED", "Baska gonderim suruyor");
             return;
         }
+        Prefs.p(this).edit().putLong("manual_request_at_ms", now)
+            .putString("manual_send_status", "Gönderiliyor; QoS1 broker onayı bekleniyor")
+            .apply();
         Prefs.p(this).edit().putBoolean("mqtt_sending", true).apply();
         setFlow("MANUEL GERÇEK MQTT", "Onayli kullanici istegi, gercek eve-gelis mesaji gonderiliyor");
         new Thread(() -> {
@@ -1102,13 +1121,17 @@ public class MonitorService extends Service {
                     .putLong("last_trigger_ms", accepted)
                     .putString("last_trigger_method", "manuel_gercek_buton")
                     .putString("manual_last_event_id", eventId)
-                    .putLong("manual_last_sent_ms", accepted).apply();
+                    .putLong("manual_last_sent_ms", accepted)
+                    .putString("manual_send_status", "BROKER PUBACK ALINDI; HA ACK bekleniyor")
+                    .apply();
                 setFlow("MANUEL GERÇEK PUBACK", "Gercek MQTT broker QoS1 onayi alindi; "
                         + "Home Assistant islemi ayri ACK ile dogrulanir. event_id=" + eventId);
                 Prefs.addEvent(this, "GERÇEK EVE GELDİM", "Broker PUBACK: " + eventId);
             } catch (Exception e) {
                 setFlow("MANUEL GERÇEK HATA", "Mesaj gonderilemedi: " + WanMqttManager.explainError(e));
                 Prefs.addEvent(this, "GERÇEK EVE GELDİM HATA", WanMqttManager.explainError(e));
+                Prefs.p(this).edit().putString("manual_send_status",
+                        "GÖNDERİLEMEDİ: " + WanMqttManager.explainError(e)).apply();
             } finally {
                 sending.set(false);
                 Prefs.p(this).edit().putBoolean("mqtt_sending", false).apply();
@@ -1127,7 +1150,8 @@ public class MonitorService extends Service {
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
         if (ACTION_MANUAL_REAL_ARRIVAL.equals(action)) {
-            sendConfirmedManualArrival();
+            sendConfirmedManualArrival(intent != null
+                    && intent.getBooleanExtra("manual_override_cooldown", false));
             return START_STICKY;
         }
         if (ACTION_WAN_RESTART.equals(action)) {
